@@ -1,20 +1,9 @@
 /**
- * Giselle Live - Real-time voice AI Fashion Stylist
+ * Giselle Live - Voice AI Fashion Stylist Configuration
  *
- * Manages Gemini Live API sessions for bidirectional audio streaming.
- * Each client WebSocket gets its own Gemini Live session.
+ * Provides system prompt, tool declarations, and client config
+ * for direct browser-to-Gemini Live API WebSocket connections.
  */
-
-const { GoogleGenAI, Modality } = require("@google/genai");
-
-let client = null;
-function getClient() {
-  if (!client) client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  return client;
-}
-
-// Active sessions: sessionId → { session, clientWs, heartbeat, resumptionHandle, userContext }
-const sessions = new Map();
 
 const SYSTEM_PROMPT = `You are Giselle, an AI Fashion Stylist & Shopping Assistant for Gemini TryOnMe Everything — a virtual try-on Chrome extension for Amazon.
 
@@ -38,21 +27,32 @@ RULES:
 - If user context is provided (name, size, preferences), personalize your advice
 - Keep responses SHORT and conversational — this is a voice chat, not an essay
 - Use the available tools when the user wants to search, try on, build outfits, or manage favorites/videos
+- If the user interrupts you or says "stop", immediately stop talking and listen to what they have to say. Be responsive to interruptions — do not continue your previous thought, instead address the user's new input
+- IMPORTANT: You MUST speak ONLY in English unless the LANGUAGE section below specifies otherwise. Ignore any background noise, ambient sounds, or unintelligible audio. If you cannot clearly understand what the user said, ask them to repeat — do NOT try to interpret noise as words in other languages. Only respond to clear, intelligible speech.
 
 OUTFIT BUILDER FLOW — CRITICAL, FOLLOW EXACTLY:
 - The outfit builder has 6 categories: top, bottom, shoes, necklace, earrings, bracelet
 - The first 3 (top, bottom, shoes) are the main items. The last 3 (necklace, earrings, bracelet) are optional accessories
-- NEVER call build_outfit immediately. ALWAYS follow this multi-step flow:
+
+CRITICAL TOOL CALLING RULE:
+- You MUST actually call the build_outfit function using the tool/function calling mechanism. Do NOT just SAY you are building an outfit — you must INVOKE the build_outfit tool. Speaking the words "I'll build that for you" is NOT the same as calling the tool. You must generate an actual function call.
+- NEVER pretend you called a tool. NEVER say "it's ready" or "you should see it now" unless you actually invoked the tool and received a response.
+
+STYLIST MODE (user wants YOU to decide):
+- If the user asks YOU to pick/choose/build an outfit without specifying individual items (e.g. "build me a cocktail outfit", "build me a complete outfit", "you choose", "surprise me", "use your own criteria", "pick everything for me", "build me an outfit for a party"), then:
+  * YOU pick search terms for ALL 6 categories using your fashion expertise
+  * IMMEDIATELY invoke the build_outfit tool with ALL 6 parameters: top, bottom, shoes, necklace, earrings, AND bracelet — do NOT skip any category, do NOT leave bracelet empty
+  * You MUST generate an actual function call — do NOT just describe the outfit in words. Speaking is NOT the same as calling the tool.
+  * Do NOT ask the user "what do you think?" or wait for confirmation — just CALL the tool immediately
+  * Do NOT say the outfit is ready until the tool has been called and a response has been received
+
+COLLABORATIVE MODE (user specifies some items):
+- If the user mentions SPECIFIC items (e.g. "build me an outfit with a black top and green skirt"), follow this multi-step flow:
   STEP 1: Collect whatever items the user mentions
   STEP 2: List back what you have so far and ASK about the remaining categories they haven't mentioned
   STEP 3: WAIT for the user to respond — they may add more items or say they're done
-  STEP 4: ONLY after the user explicitly confirms (e.g. "that's it", "I'm done", "go ahead", "build it", "no more") → THEN call build_outfit
-- Example conversation:
-  User: "Build me an outfit with a black top and green skirt"
-  You: "Great choices! I have a black top and green skirt. What about shoes? And would you like any accessories — a necklace, earrings, or bracelet?"
-  User: "Green sneakers and that's it"
-  You: [NOW call build_outfit with top="black top", bottom="green skirt", shoes="green sneakers"]
-- DO NOT call build_outfit until the user says they are done. This is mandatory — even if they gave you 3 items, ASK about the remaining categories first
+  STEP 4: ONLY after the user explicitly confirms → invoke the build_outfit tool
+- DO NOT call build_outfit until the user says they are done in this mode
 - CRITICAL: When you call build_outfit, you MUST pass EVERY item as a named parameter in the function call:
   * If user mentioned "black earrings" → include earrings="black earrings" in the tool call
   * If user mentioned "gold necklace" → include necklace="gold necklace" in the tool call
@@ -114,7 +114,7 @@ const GISELLE_TOOLS = [
       },
       {
         name: "build_outfit",
-        description: "Build a complete outfit. IMPORTANT: Do NOT call this tool until the user has explicitly confirmed they are done adding items. You MUST first ask about any categories they haven't mentioned (top, bottom, shoes, necklace, earrings, bracelet) and wait for confirmation. When calling, include ALL items mentioned across the entire conversation — do NOT omit items the user mentioned earlier.",
+        description: "Build a complete outfit with up to 6 categories: top, bottom, shoes, necklace, earrings, bracelet. You MUST call this tool to build an outfit — do NOT just describe the outfit verbally. In stylist mode (user asks you to pick), call IMMEDIATELY with all 6 categories filled. In collaborative mode, wait for user confirmation first. Always include ALL items mentioned across the entire conversation.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -161,7 +161,7 @@ const GISELLE_TOOLS = [
       },
       {
         name: "recommend_items",
-        description: "Visually analyze the search results and recommend the best items for the user based on their skin tone, body type, and style. Use when the user asks 'which one should I try?', 'what do you recommend?', 'what looks best on me?', or similar. This sends the user's photo and search results screenshot for visual analysis.",
+        description: "Visually analyze the current search results or outfit builder items against the user's actual photo to give personalized style recommendations. In smart search mode, recommends the best individual items. In outfit builder mode, recommends the best COMBINATION of items across all 6 categories (top, bottom, shoes, necklace, earrings, bracelet) that create the most cohesive outfit. Use when the user asks 'which one should I try?', 'what do you recommend?', 'what looks best on me?', 'which combination?', or any recommendation request.",
         parameters: {
           type: "OBJECT",
           properties: {},
@@ -176,6 +176,14 @@ const GISELLE_TOOLS = [
             number: { type: "NUMBER", description: "The item number from the search results (1-based, e.g. 1, 2, 3)" },
           },
           required: ["number"],
+        },
+      },
+      {
+        name: "animate",
+        description: "Animate the current try-on result into a short video. Use when the user asks to animate, create a video, or see themselves moving in the outfit.",
+        parameters: {
+          type: "OBJECT",
+          properties: {},
         },
       },
       {
@@ -227,272 +235,23 @@ function buildSystemInstruction(userContext) {
   return instruction;
 }
 
-/**
- * Send a JSON message to client WebSocket if open.
- */
-function sendToClient(clientWs, msg) {
-  if (clientWs.readyState === 1) { // WebSocket.OPEN
-    clientWs.send(JSON.stringify(msg));
-  }
-}
 
 /**
- * Create a new Gemini Live session for a client.
- * If resumptionHandle is provided, resumes the previous session with context intact.
+ * Get config for direct client-to-Gemini WebSocket connection.
+ * Returns API key, model, system instruction, tools, and speech config.
  */
-async function createSession(sessionId, clientWs, userContext, resumptionHandle) {
-  const ai = getClient();
-
-  const isResume = !!resumptionHandle;
-  console.log(`[giselle-live] ${isResume ? "Resuming" : "Creating"} session ${sessionId}`);
-
-  const session = await ai.live.connect({
-    model: "gemini-2.5-flash-native-audio-latest",
-    config: {
-      responseModalities: [Modality.AUDIO],
-      systemInstruction: buildSystemInstruction(userContext),
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: "Aoede" },
-        },
-      },
-      tools: GISELLE_TOOLS,
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
-      sessionResumption: resumptionHandle ? { handle: resumptionHandle } : {},
-    },
-    callbacks: {
-      onopen: () => {
-        console.log(`[giselle-live] Session ${sessionId} connected to Gemini${isResume ? " (resumed)" : ""}`);
-        sendToClient(clientWs, { type: "setup_complete" });
-      },
-      onmessage: (msg) => {
-        handleServerMessage(sessionId, clientWs, msg);
-      },
-      onerror: (e) => {
-        console.error(`[giselle-live] Session ${sessionId} error:`, e.message || e.error || e);
-        sendToClient(clientWs, { type: "error", message: "Voice session error" });
-      },
-      onclose: (e) => {
-        console.log(`[giselle-live] Session ${sessionId} Gemini closed — code: ${e?.code}, reason: ${e?.reason || "(none)"}`);
-        sendToClient(clientWs, { type: "session_closed" });
-        // Don't cleanup — keep entry so resumptionHandle + userContext survive for reconnect
-      },
-    },
-  });
-
-  // Heartbeat to keep Cloud Run WS alive
-  const heartbeat = setInterval(() => {
-    if (clientWs.readyState === 1) {
-      clientWs.ping();
-    } else {
-      cleanup(sessionId);
-    }
-  }, 30000);
-
-  const existing = sessions.get(sessionId);
-  sessions.set(sessionId, {
-    session,
-    clientWs,
-    heartbeat,
-    resumptionHandle: existing?.resumptionHandle || null,
-    userContext,
-  });
-  return session;
-}
-
-/**
- * Handle messages from Gemini Live API.
- */
-function handleServerMessage(sessionId, clientWs, msg) {
-  // Audio data from model
-  if (msg.serverContent?.modelTurn?.parts) {
-    for (const part of msg.serverContent.modelTurn.parts) {
-      if (part.inlineData) {
-        sendToClient(clientWs, {
-          type: "audio",
-          data: part.inlineData.data,
-          mimeType: part.inlineData.mimeType,
-        });
-      }
-      if (part.text) {
-        sendToClient(clientWs, {
-          type: "text_response",
-          text: part.text,
-        });
-      }
-    }
-  }
-
-  // Turn complete
-  if (msg.serverContent?.turnComplete) {
-    sendToClient(clientWs, { type: "turn_complete" });
-  }
-
-  // Barge-in / interrupted
-  if (msg.serverContent?.interrupted) {
-    sendToClient(clientWs, { type: "interrupted" });
-  }
-
-  // Input transcription (what the user said)
-  if (msg.serverContent?.inputTranscription?.text) {
-    sendToClient(clientWs, {
-      type: "input_transcription",
-      text: msg.serverContent.inputTranscription.text,
-    });
-  }
-
-  // Output transcription (what the model said)
-  if (msg.serverContent?.outputTranscription?.text) {
-    sendToClient(clientWs, {
-      type: "output_transcription",
-      text: msg.serverContent.outputTranscription.text,
-    });
-  }
-
-  // Tool calls (intents)
-  if (msg.toolCall?.functionCalls) {
-    sendToClient(clientWs, {
-      type: "tool_call",
-      functionCalls: msg.toolCall.functionCalls,
-    });
-  }
-
-  // Tool call cancellation
-  if (msg.toolCallCancellation?.ids) {
-    sendToClient(clientWs, {
-      type: "tool_call_cancellation",
-      ids: msg.toolCallCancellation.ids,
-    });
-  }
-
-  // Session resumption update — store the handle for reconnection
-  if (msg.sessionResumptionUpdate) {
-    if (msg.sessionResumptionUpdate.resumable && msg.sessionResumptionUpdate.newHandle) {
-      const entry = sessions.get(sessionId);
-      if (entry) {
-        entry.resumptionHandle = msg.sessionResumptionUpdate.newHandle;
-        console.log(`[giselle-live] Session ${sessionId} got resumption handle`);
-      }
-    }
-  }
-
-  // Server going away — include resumption handle so client can reconnect with context
-  if (msg.goAway) {
-    const entry = sessions.get(sessionId);
-    sendToClient(clientWs, {
-      type: "go_away",
-      timeLeft: msg.goAway.timeLeft,
-      resumptionHandle: entry?.resumptionHandle || null,
-    });
-  }
-}
-
-/**
- * Send audio data to Gemini Live session.
- */
-function sendAudio(sessionId, audioBase64) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  entry.session.sendRealtimeInput({
-    audio: {
-      data: audioBase64,
-      mimeType: "audio/pcm;rate=16000",
-    },
-  });
-}
-
-/**
- * Send an image to Gemini Live session with optional context text.
- * Used for vision — sending screenshots and user photos so Giselle can "see" products.
- */
-function sendImage(sessionId, imageBase64, mimeType, contextText) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  const parts = [];
-  if (imageBase64) {
-    parts.push({ inlineData: { data: imageBase64, mimeType: mimeType || "image/jpeg" } });
-  }
-  if (contextText) {
-    parts.push({ text: contextText });
-  }
-  if (parts.length === 0) return;
-
-  entry.session.sendClientContent({
-    turns: [{ role: "user", parts }],
-    turnComplete: false, // don't end the turn — more images or audio may follow
-  });
-  console.log(`[giselle-live] Sent image to session ${sessionId} (${contextText ? contextText.substring(0, 50) + '...' : 'no context'})`);
-}
-
-/**
- * Send text to Gemini Live session.
- */
-function sendText(sessionId, text) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  entry.session.sendClientContent({
-    turns: [{ role: "user", parts: [{ text }] }],
-    turnComplete: true,
-  });
-}
-
-/**
- * Send tool response back to Gemini.
- */
-function sendToolResponse(sessionId, functionResponses) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  entry.session.sendToolResponse({ functionResponses });
-}
-
-/**
- * Signal end of audio stream.
- */
-function sendAudioEnd(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  entry.session.sendRealtimeInput({ audioStreamEnd: true });
-}
-
-/**
- * Close and clean up a session.
- */
-function closeSession(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  try {
-    entry.session.close();
-  } catch (e) {
-    console.warn(`[giselle-live] Error closing session ${sessionId}:`, e.message);
-  }
-  cleanup(sessionId);
-}
-
-/**
- * Internal cleanup.
- */
-function cleanup(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-
-  if (entry.heartbeat) clearInterval(entry.heartbeat);
-  sessions.delete(sessionId);
-  console.log(`[giselle-live] Session ${sessionId} cleaned up. Active sessions: ${sessions.size}`);
+function getClientConfig(userContext) {
+  return {
+    apiKey: process.env.GEMINI_API_KEY,
+    model: "gemini-2.5-flash-native-audio-preview-12-2025",
+    systemInstruction: buildSystemInstruction(userContext),
+    tools: GISELLE_TOOLS,
+    voiceName: "Aoede",
+  };
 }
 
 module.exports = {
-  createSession,
-  sendAudio,
-  sendImage,
-  sendText,
-  sendToolResponse,
-  sendAudioEnd,
-  closeSession,
+  getClientConfig,
+  buildSystemInstruction,
+  GISELLE_TOOLS,
 };

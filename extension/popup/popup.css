@@ -1226,10 +1226,10 @@ a.video-outfit-link:hover { background: rgba(255, 153, 0, 0.25); text-decoration
   transition: background 0.2s;
 }
 .giselle-mic-btn {
-  background: #FF9900;
+  background: #4CAF50;
   color: #fff;
 }
-.giselle-mic-btn:hover { background: #FFB84D; }
+.giselle-mic-btn:hover { background: #66BB6A; }
 .giselle-mic-btn.recording {
   background: #FF9900;
   color: white;

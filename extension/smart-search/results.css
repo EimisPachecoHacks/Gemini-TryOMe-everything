@@ -465,6 +465,32 @@ body {
   cursor: default;
 }
 
+/* ---------------------------------------------------------------------------
+   Style Tips
+   --------------------------------------------------------------------------- */
+.nova-tryon-style-tips {
+  width: 100%;
+  padding: 12px 16px;
+  background: #fff9f0;
+  border: 1px solid #ffd89b;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #0f1111;
+  line-height: 1.6;
+  margin: 12px 0;
+}
+
+.nova-tryon-style-tips-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: #c45500;
+}
+
+.nova-tryon-style-tip {
+  margin-bottom: 4px;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
   .nova-grid {

@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
+const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
 const { withCircuitBreaker } = require("./circuitBreaker");
 const { withTimeout } = require("./withTimeout");
 
@@ -40,50 +41,59 @@ function getClient() {
 }
 
 /**
- * Background removal using Gemini 3 Pro Image
+ * Background removal using Amazon Nova Canvas via AWS Bedrock
  */
-async function removeBackground(imageBase64) {
-  console.log("[geminiCanvas] removeBackground - processing");
+let bedrockClient = null;
 
-  const client = getClient();
-
-  const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
-    model: "gemini-2.5-flash-image",
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: "Remove the background from this image completely. Keep ONLY the main subject (person or garment). Place the subject on a clean, plain white background. Preserve the subject exactly as-is — same colors, details, proportions. Output only the resulting image.",
-          },
-          {
-            inlineData: {
-              mimeType: getMimeType(imageBase64),
-              data: imageBase64,
-            },
-          },
-        ],
-      },
-    ],
-    config: {
-      responseModalities: ["TEXT", "IMAGE"],
-    },
-  }), GEMINI_TIMEOUT_MS, "removeBackground"));
-
-  const candidates = response.candidates || [];
-  if (!candidates.length) {
-    throw new Error("No response from Gemini for background removal");
-  }
-
-  const parts = candidates[0].content?.parts || [];
-  for (const part of parts) {
-    if (part.inlineData) {
-      console.log("[geminiCanvas] removeBackground - success");
-      return part.inlineData.data;
+function getBedrockClient() {
+  if (!bedrockClient) {
+    const config = { region: process.env.AWS_REGION || "us-east-1" };
+    if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+      config.credentials = {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      };
     }
+    bedrockClient = new BedrockRuntimeClient(config);
+  }
+  return bedrockClient;
+}
+
+async function removeBackground(imageBase64) {
+  console.log("[novaCanvas] removeBackground - processing");
+
+  const client = getBedrockClient();
+
+  const body = JSON.stringify({
+    taskType: "BACKGROUND_REMOVAL",
+    backgroundRemovalParams: {
+      image: imageBase64,
+    },
+  });
+
+  const command = new InvokeModelCommand({
+    modelId: "amazon.nova-canvas-v1:0",
+    body: body,
+    contentType: "application/json",
+    accept: "application/json",
+  });
+
+  const response = await withCircuitBreaker("novaCanvas", () =>
+    withTimeout(client.send(command), GEMINI_TIMEOUT_MS, "removeBackground")
+  );
+
+  const result = JSON.parse(new TextDecoder().decode(response.body));
+
+  if (result.images && result.images.length > 0) {
+    console.log("[novaCanvas] removeBackground - success");
+    return result.images[0];
   }
 
-  throw new Error("No image in Gemini background removal response");
+  if (result.error) {
+    throw new Error(`Nova Canvas error: ${result.error}`);
+  }
+
+  throw new Error("No image in Nova Canvas background removal response");
 }
 
 /**

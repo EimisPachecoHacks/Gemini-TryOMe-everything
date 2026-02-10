@@ -150,6 +150,7 @@ router.post("/", optionalAuth, async (req, res, next) => {
     let garmentImageForTryOn = referenceImage;
     let garmentImageUsed = "original";
     let outfitInfo = { currentType: "UPPER_LOWER" };
+    let analysisResult = null;
 
     if (quickMode && garmentClass) {
       // ═══════════════════════════════════════════════════
@@ -193,7 +194,6 @@ router.post("/", optionalAuth, async (req, res, next) => {
     console.log(`\x1b[32m  ✓ PARALLEL STEPS COMPLETE\x1b[0m \x1b[90m(${parallelTime}s wall-clock)\x1b[0m`);
 
     // Process Step 1 result
-    let analysisResult = null;
     if (step1Result.status === "fulfilled") {
       analysisResult = step1Result.value.result;
       if (!garmentClass && analysisResult.garmentClass) {
@@ -276,6 +276,7 @@ router.post("/", optionalAuth, async (req, res, next) => {
     res.json({
       resultImage,
       garmentImageUsed,
+      styleTips: analysisResult?.styleTips || [],
       debug: {
         steps: debugSteps,
         garmentImageUsed,

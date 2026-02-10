@@ -478,18 +478,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         case "VOICE_SAVE_VIDEO": {
-          // Read last video from storage and save via API
+          // Read lastVideo from storage — wardrobe's handleAnimate stores outfitItems there
           const lastVideo = (await chrome.storage.local.get("lastVideo")).lastVideo;
           if (!lastVideo) {
             sendResponse({ error: "No video to save" });
             break;
           }
+          console.log("[background] VOICE_SAVE_VIDEO — outfitItems:", (lastVideo.outfitItems || []).length, "items, title:", (lastVideo.productTitle || "").substring(0, 50));
           const saveResult = await apiPost("/api/video/save", {
             videoUrl: lastVideo.videoUrl,
             videoBase64: lastVideo.videoBase64,
-            asin: lastVideo.productId,
-            productTitle: lastVideo.productTitle,
-            productImage: lastVideo.productImage,
+            asin: lastVideo.productId || "",
+            productTitle: lastVideo.productTitle || "",
+            productImage: lastVideo.productImage || "",
+            outfitItems: lastVideo.outfitItems || [],
           });
           sendResponse({ data: saveResult });
           break;

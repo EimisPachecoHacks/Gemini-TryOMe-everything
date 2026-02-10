@@ -19,7 +19,6 @@ const profileRoutes = require("./routes/profile");
 const favoritesRoutes = require("./routes/favorites");
 const smartSearchRoutes = require("./routes/smartSearch");
 const accountRoutes = require("./routes/account");
-const voiceRoutes = require("./routes/voice");
 const cartRoutes = require("./routes/cart");
 const shareRoutes = require("./routes/share");
 const recommendRoutes = require("./routes/recommend");
@@ -126,10 +125,24 @@ app.use("/api/video", videoRoutes);
 app.use("/api/image", imageRoutes);
 app.use("/api/smart-search", smartSearchRoutes);
 app.use("/api/account", accountRoutes);
-app.use("/api/voice", voiceRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/share", shareRoutes);
 app.use("/api/recommend", recommendRoutes);
+
+// Voice config endpoint — provides API key + config for direct client-to-Gemini connection
+const giselleLive = require("./services/giselleLive");
+app.get("/api/voice-config", (req, res) => {
+  const userContext = {
+    name: req.query.name || '',
+    size: req.query.size || '',
+    shoesSize: req.query.shoesSize || '',
+    sex: req.query.sex || '',
+    language: req.query.language || 'en',
+    preferences: req.query.preferences || '',
+  };
+  const config = giselleLive.getClientConfig(userContext);
+  res.json(config);
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -151,7 +164,7 @@ app.use((err, req, res, next) => {
   res.status(statusCode).json({ error: clientMessage });
 });
 
-// Create HTTP server and attach WebSocket server for voice streaming
+// Create HTTP server and attach WebSocket for voice streaming (Vertex AI proxy)
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/voice-live" });
 wss.on("connection", voiceLiveHandler);
@@ -160,5 +173,5 @@ server.listen(PORT, () => {
   console.log(`GeminiTryOnMe backend running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/`);
   console.log(`WebSocket: ws://localhost:${PORT}/ws/voice-live`);
-  console.log(`GCP Project: ${process.env.GCP_PROJECT_ID ? "(configured)" : "(not set)"}`);
+  console.log(`GCP Project: ${process.env.GCP_PROJECT_ID || "(using default)"}`);
 });

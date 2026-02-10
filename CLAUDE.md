@@ -53,28 +53,58 @@ The outfit builder supports **6 categories**: top, bottom, shoes, necklace, earr
 - Do NOT reduce the number of categories below 6
 
 ### Voice Agent (Giselle Live) — CRITICAL Configuration
-- **Model**: `gemini-2.5-flash-native-audio-latest` (in `backend/services/giselleLive.js`)
-- This is a **native audio** model — it generates speech directly, NOT text-to-speech
-- Do NOT change this model name. Other models (e.g. `gemini-2.0-flash`, `gemini-2.0-flash-live-001`) do NOT support native audio and will cause 1008 WebSocket errors
-- **sessionResumption config**:
-  - First connect: pass empty object `{}` — do NOT pass `{ handle: null }` (causes 1008 "Operation not implemented" error)
-  - Reconnect: pass `{ handle: resumptionHandle }` with the handle received from `goAway` event
-  - Code: `sessionResumption: resumptionHandle ? { handle: resumptionHandle } : {}`
-- **Required config fields** (do NOT remove any):
-  - `responseModalities: [Modality.AUDIO]`
-  - `inputAudioTranscription: {}`
-  - `outputAudioTranscription: {}`
-  - `speechConfig` with `voiceName: "Aoede"`
-- **Known issues that were fixed**:
-  - Passing `sessionResumption: { handle: null }` on first connect → 1008 disconnect
-  - Using wrong model names (hallucinated names) → 1008 "model not found"
-  - `contextWindowCompression` is NOT needed and was removed
-- **WebSocket path**: `/ws/voice-live` (in `backend/server.js`)
-- **Vision**: Images sent via `sendImage()` using `session.sendClientContent()` with `inlineData` parts
-- Do NOT switch to ADK (Agent Development Kit) — the app uses `@google/genai` SDK's `ai.live.connect()` directly
+
+**Architecture: Vertex AI Backend Proxy**
+- Browser connects via WebSocket to our backend at `/ws/voice-live`
+- Backend (`backend/routes/voiceLive.js`) proxies to Gemini Live API via Vertex AI using `@google/genai` SDK with `vertexai: true`
+- Authentication: Cloud Run service account `erica-deployment-bot` with `roles/aiplatform.user` IAM role
+- Reference implementation: https://github.com/ZackAkil/immersive-language-learning-with-live-api
+- Do NOT switch to direct browser-to-Gemini connection — Vertex AI requires server-side authentication
+
+**Vertex AI SDK Connection** (in `backend/routes/voiceLive.js`):
+- SDK: `@google/genai` Node.js SDK with `vertexai: true`
+- Model: `gemini-live-2.5-flash-native-audio` — this is a **native audio** model (generates speech directly, NOT text-to-speech)
+- Project: `project-4213188d-5b34-47c7-84e`, Location: `us-central1`
+- Connection: `ai.live.connect({ model, config, callbacks })`
+- Do NOT change the model name. Previous bugs were caused by wrong model names:
+  - `gemini-2.5-flash-preview-native-audio-dialog` → permission errors
+  - `gemini-2.0-flash`, `gemini-2.0-flash-live-001` → do NOT support native audio
+  - `gemini-2.5-flash-native-audio-latest` → not valid for Vertex AI
+
+**Required config fields in `ai.live.connect()`** (do NOT remove any):
+- `responseModalities: [Modality.AUDIO]`
+- `inputAudioTranscription: {}`
+- `outputAudioTranscription: {}`
+- `speechConfig` with `voiceName: "Aoede"`
+- `tools: GISELLE_TOOLS` (from `backend/services/giselleLive.js`)
+
+**Do NOT add these — they cause disconnections**:
+- `sessionResumption` — causes 1008 "Operation is not implemented"
+- `contextWindowCompression` — causes 1008 "Operation is not implemented"
+- Any config field not listed above as required
+
+**Message flow**:
+- Client sends JSON: `{ setup: { userContext } }` → backend creates Gemini session
+- Client sends audio: `{ realtimeInput: { mediaChunks: [...] } }` → backend calls `session.sendRealtimeInput()`
+- Client sends tool response: `{ toolResponse: { functionResponses: [...] } }` → backend calls `session.sendToolResponse()`
+- Backend forwards Gemini responses to client: audio, transcriptions, tool calls, turn complete
+
+**Configuration files**:
+- `backend/routes/voiceLive.js` — WebSocket proxy handler (Vertex AI connection)
+- `backend/services/giselleLive.js` — System prompt, tool declarations (`GISELLE_TOOLS`), `buildSystemInstruction()`, `getClientConfig()`
+- `extension/popup/popup.js` — Client-side WebSocket connection and tool execution
+
+**IAM Requirements**:
+- Service account `erica-deployment-bot` must have `roles/aiplatform.user` on the GCP project
+- Without this role: `Permission 'aiplatform.endpoints.predict' denied` → 1008 disconnect
+
+**Variable scoping in popup.js**:
+- `autoTryOnFromVoice` MUST be declared at module level (top of file), not inside the voice agent scope
+- It is read by the `outfitBuildBtn` click handler AND set by the voice `build_outfit` tool handler — both must share the same scope
 
 ## Tests
 - Run: `cd backend && npm test`
 - `__tests__/outfitBuilder.test.js` — validates 6-category search, concurrency limiter, outfit try-on with 7 images, URL param parsing, ASIN extraction
 - `__tests__/circuitBreaker.test.js` — validates circuit breaker state machine
 - `__tests__/validation.test.js` — validates image payload validation
+- `__tests__/voiceAgent.test.js` — validates voice agent tool declarations (12 tools), system prompt, `buildSystemInstruction()`, and `getClientConfig()`

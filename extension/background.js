@@ -397,6 +397,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
 
+        case "ANIMATE_TRYON": {
+          // Forward to active tab's content script to trigger the animate button
+          const [animTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (animTab?.id) {
+            chrome.tabs.sendMessage(animTab.id, { type: "ANIMATE_TRYON" }, (res) => {
+              sendResponse({ data: res || { success: true } });
+            });
+          } else {
+            sendResponse({ error: "No active tab found" });
+          }
+          break;
+        }
+
         case "SAVE_VIDEO": {
           // Forward to active tab's content script to trigger the save-video button
           const [vidTab] = await chrome.tabs.query({ active: true, currentWindow: true });

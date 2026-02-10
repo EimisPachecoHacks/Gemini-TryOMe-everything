@@ -9,6 +9,7 @@
     "test": "jest --verbose"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1012.0",
     "@fal-ai/client": "^1.9.4",
     "@google-cloud/firestore": "^8.3.0",
     "@google-cloud/storage": "^7.19.0",

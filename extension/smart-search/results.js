@@ -517,7 +517,7 @@ async function handleTryOn(index) {
         } catch (_) {}
         storeDebugImages(debugBodyPhoto, garmentBase64, debugInfo);
       }
-      showTryOnResult(resultImage, product);
+      showTryOnResult(resultImage, product, response.styleTips || analysisResult?.styleTips || []);
     } else {
       throw new Error(response?.error || "Try-on failed — no result image returned");
     }
@@ -569,7 +569,7 @@ function showTryOnModal() {
   body.appendChild(loadingDiv);
 }
 
-function showTryOnResult(base64Image, product) {
+function showTryOnResult(base64Image, product, styleTips) {
   const body = document.getElementById("tryOnModalBody");
   body.innerHTML = "";
   const title = product.title || "";
@@ -585,6 +585,24 @@ function showTryOnResult(base64Image, product) {
   caption.style.cssText = "text-align:center; margin-top:12px; font-size:13px; color:#565959;";
   caption.textContent = title;
   body.appendChild(caption);
+
+  // Style Tips
+  const tips = Array.isArray(styleTips) ? styleTips : [];
+  if (tips.length > 0) {
+    const tipsDiv = document.createElement("div");
+    tipsDiv.className = "nova-tryon-style-tips";
+    const tipsTitle = document.createElement("div");
+    tipsTitle.className = "nova-tryon-style-tips-title";
+    tipsTitle.textContent = "Style Tips";
+    tipsDiv.appendChild(tipsTitle);
+    for (const tip of tips) {
+      const tipEl = document.createElement("div");
+      tipEl.className = "nova-tryon-style-tip";
+      tipEl.textContent = String(tip);
+      tipsDiv.appendChild(tipEl);
+    }
+    body.appendChild(tipsDiv);
+  }
 
   // Save to Favorites — same as content.js ApiClient.addFavorite()
   const favDiv = document.createElement("div");
@@ -792,6 +810,30 @@ function closeTryOnModal() {
 
 // Voice agent item selection — highlights item and triggers try-on
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // Voice agent: animate try-on result
+  if (message.type === "ANIMATE_TRYON") {
+    const animateBtn = document.querySelector(".nova-btn.nova-btn-primary:not(:disabled)");
+    if (animateBtn && animateBtn.textContent.includes("Animate")) {
+      animateBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: "No try-on result to animate" });
+    }
+    return false;
+  }
+
+  // Voice agent: save to favorites
+  if (message.type === "SAVE_TO_FAVORITES") {
+    const favBtn = document.querySelector(".nova-btn-favorite:not(.nova-btn-favorite--saved)");
+    if (favBtn) {
+      favBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: "No unsaved try-on result found" });
+    }
+    return false;
+  }
+
   if (message.type === "VOICE_SELECT_SEARCH_ITEM") {
     const index = message.number - 1; // convert 1-based to 0-based
     const cards = document.querySelectorAll(".nova-card");

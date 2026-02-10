@@ -1,180 +1,126 @@
 /**
- * Temu Product Page Scraper
+ * Gemini TryOnMe Everything - Temu Product Page Scraper
  *
- * Extracts product information from Temu product pages.
- * Temu uses minified React classes that change frequently, so we rely on
- * structural selectors, data attributes, and CDN URL patterns.
+ * Extracts product information from the DOM of a Temu product page.
  * Designed to work as a content script loaded before content.js.
  */
 
 /**
  * Scrape product data from the current Temu product page.
  *
- * @returns {{ imageUrl: string|null, title: string|null, breadcrumbs: string, productId: string|null, price: string|null, retailer: "temu" }}
+ * @returns {{ imageUrl: string|null, title: string|null, breadcrumbs: string, productId: string|null, price: string|null, retailer: string, productUrl: string }}
  */
 function scrapeProductData() {
   // ---------------------------------------------------------------------------
-  // 1. Product image — Temu uses img.kwcdn.com CDN
+  // 1. Product image — Temu uses dynamically-named classes, so we use multiple strategies
   // ---------------------------------------------------------------------------
   let imageUrl = null;
 
-  // Try to find the main product gallery image (usually the largest one)
-  // Temu wraps images in a carousel/gallery container
-  const galleryImgs = document.querySelectorAll("img[src*='img.kwcdn.com']");
-  if (galleryImgs.length) {
-    // Pick the largest image (likely the main product photo)
-    let maxWidth = 0;
-    for (const img of galleryImgs) {
-      const w = img.naturalWidth || img.width || parseInt(img.getAttribute("width") || "0", 10);
-      if (w > maxWidth) {
-        maxWidth = w;
-        imageUrl = img.src;
-      }
-    }
-    // If none had dimensions, just pick the first CDN image
-    if (!imageUrl && galleryImgs.length) {
-      imageUrl = galleryImgs[0].src;
+  // Try main product gallery image (Temu uses img.kwcdn.com and fimg.kwcdn.com)
+  const kwImgs = Array.from(document.querySelectorAll("img[src*='kwcdn.com'], img[src*='temu.com']"));
+  if (kwImgs.length) {
+    // Pick the largest visible image (likely the hero)
+    const hero = kwImgs.find(img => {
+      const rect = img.getBoundingClientRect();
+      return rect.width > 200 && rect.height > 200;
+    });
+    if (hero) imageUrl = hero.src;
+    if (!imageUrl) imageUrl = kwImgs[0].src;
+  }
+
+  // Fallback: look for images inside known product image containers
+  if (!imageUrl) {
+    const containerImg = document.querySelector("[class*='ProductImage'] img") ||
+                         document.querySelector("[class*='product-image'] img") ||
+                         document.querySelector("[class*='gallery'] img") ||
+                         document.querySelector("[class*='goodsImage'] img") ||
+                         document.querySelector("[class*='goods-image'] img");
+    if (containerImg) imageUrl = containerImg.src;
+  }
+
+  // Fallback: try to extract from top_gallery_url query param in the page URL
+  if (!imageUrl) {
+    const params = new URLSearchParams(window.location.search);
+    const galleryUrl = params.get("top_gallery_url");
+    if (galleryUrl) {
+      try { imageUrl = decodeURIComponent(galleryUrl); } catch (_) {}
     }
   }
 
-  // Fallback: try data-src lazy-loaded images
+  // Fallback: any large visible image
   if (!imageUrl) {
-    const lazyImg = document.querySelector("img[data-src*='img.kwcdn.com']");
-    if (lazyImg) {
-      imageUrl = lazyImg.getAttribute("data-src");
-    }
-  }
-
-  // Fallback: first large image on the page
-  if (!imageUrl) {
-    const allImgs = document.querySelectorAll("main img, [role='main'] img, img");
-    for (const img of allImgs) {
-      const w = img.naturalWidth || img.width || 0;
-      if (w >= 200 && img.src && !img.src.startsWith("data:") && !img.src.includes("icon") && !img.src.includes("logo")) {
-        imageUrl = img.src;
-        break;
-      }
-    }
+    const allImgs = Array.from(document.querySelectorAll("img"));
+    const large = allImgs.find(img => {
+      const rect = img.getBoundingClientRect();
+      return rect.width > 200 && rect.height > 200;
+    });
+    if (large) imageUrl = large.src;
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Product title — usually the only h1 on the page
+  // 2. Product title
   // ---------------------------------------------------------------------------
   let title = null;
-  const h1 = document.querySelector("h1");
-  if (h1 && h1.textContent.trim().length > 5) {
-    title = h1.textContent.trim();
+  // Temu uses hashed class names — try h1 first, then look for the title by structure
+  const titleEl = document.querySelector("h1");
+  if (titleEl) {
+    title = titleEl.textContent.trim();
   }
-
-  // Fallback: title-like element
+  // Fallback: extract from og:title meta tag
   if (!title) {
-    const titleEl = document.querySelector("[class*='title'][class*='product'], [data-testid*='title']");
-    if (titleEl) title = titleEl.textContent.trim();
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    if (ogTitle) title = ogTitle.content;
+  }
+  // Fallback: page title minus " | Temu ..." suffix
+  if (!title) {
+    const pageTitle = document.title.replace(/\s*[\|–—].*Temu.*$/i, "").trim();
+    if (pageTitle) title = pageTitle;
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Breadcrumbs (category path)
+  // 3. Breadcrumbs
   // ---------------------------------------------------------------------------
   let breadcrumbs = "";
-  const crumbSelectors = [
-    "nav[class*='breadcrumb'] a",
-    "[class*='breadcrumb'] a",
-    "[aria-label*='breadcrumb'] a",
-    "nav a[href*='/']",
-  ];
-  for (const sel of crumbSelectors) {
-    const links = document.querySelectorAll(sel);
-    if (links.length >= 2) {
-      const crumbs = Array.from(links)
-        .map((el) => el.textContent.trim())
-        .filter((t) => t.length > 0 && t !== "Home");
-      if (crumbs.length) {
-        breadcrumbs = crumbs.join(" > ");
-        break;
-      }
+  const crumbEls = document.querySelectorAll("[class*='breadcrumb'] a, nav a");
+  if (crumbEls.length) {
+    const crumbs = Array.from(crumbEls)
+      .map(el => el.textContent.trim())
+      .filter(t => t && t.length < 60); // Filter out non-breadcrumb nav links
+    if (crumbs.length > 1) {
+      breadcrumbs = crumbs.join(" > ");
     }
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Product ID — extract from URL or page metadata
+  // 4. Product ID — extract from URL pattern: -g-12345.html or /goods-detail?goods_id=12345
   // ---------------------------------------------------------------------------
   let productId = null;
-
-  // Temu URLs: temu.com/product-name-g-601100312250166.html or ?goods_id=...
-  const goodsMatch = window.location.href.match(/-g-(\d+)\.html/);
-  if (goodsMatch) {
-    productId = goodsMatch[1];
+  const gMatch = window.location.pathname.match(/-g-(\d+)/);
+  if (gMatch) {
+    productId = gMatch[1];
   }
 
-  // Fallback: goods_id query parameter
+  // Fallback: try URL query params
   if (!productId) {
-    const urlParams = new URLSearchParams(window.location.search);
-    productId = urlParams.get("goods_id") || urlParams.get("id");
+    const params = new URLSearchParams(window.location.search);
+    productId = params.get("goods_id") || params.get("productId");
   }
 
-  // Fallback: try to extract from canonical link
+  // Fallback: try any numeric ID in the URL path (6+ digits)
   if (!productId) {
-    const canonical = document.querySelector("link[rel='canonical']");
-    if (canonical) {
-      const canonMatch = canonical.href.match(/-g-(\d+)\.html/);
-      if (canonMatch) productId = canonMatch[1];
-    }
-  }
-
-  // Fallback: extract numeric ID from any part of the URL
-  if (!productId) {
-    const numMatch = window.location.pathname.match(/(\d{10,})/);
+    const numMatch = window.location.pathname.match(/(\d{6,})/);
     if (numMatch) productId = numMatch[1];
-  }
-
-  // Fallback: try JSON-LD or page script data
-  if (!productId) {
-    try {
-      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-      for (const script of scripts) {
-        const data = JSON.parse(script.textContent);
-        if (data && data.sku) {
-          productId = String(data.sku);
-          break;
-        }
-        if (data && data.productID) {
-          productId = String(data.productID);
-          break;
-        }
-      }
-    } catch (err) { console.warn("[temu-scraper] JSON-LD parse error:", err.message); }
   }
 
   // ---------------------------------------------------------------------------
   // 5. Price
   // ---------------------------------------------------------------------------
   let price = null;
-
-  // Look for price elements containing $ sign
-  const priceSelectors = [
-    "[class*='price'] [class*='sale']",
-    "[class*='price'] [class*='current']",
-    "[class*='price'][class*='main']",
-    "[data-testid*='price']",
-  ];
-  for (const sel of priceSelectors) {
-    const el = document.querySelector(sel);
-    if (el && el.textContent.includes("$")) {
-      price = el.textContent.trim();
-      break;
-    }
-  }
-
-  // Fallback: find any element with $ and a number
-  if (!price) {
-    const allEls = document.querySelectorAll("[class*='price']");
-    for (const el of allEls) {
-      const text = el.textContent.trim();
-      if (text.match(/\$\d+/) && text.length < 30) {
-        price = text;
-        break;
-      }
-    }
+  const priceEl = document.querySelector("[class*='price'] [class*='sale']") ||
+                  document.querySelector("[class*='Price']") ||
+                  document.querySelector("[class*='price']");
+  if (priceEl) {
+    price = priceEl.textContent.trim();
   }
 
   return { imageUrl, title, breadcrumbs, productId, price, retailer: "temu", productUrl: window.location.href };
@@ -187,26 +133,17 @@ function scrapeProductData() {
  * @returns {string|null}
  */
 function scrapeCurrentImageUrl() {
-  // Temu: look for the main/active gallery image
-  const galleryImgs = document.querySelectorAll("img[src*='img.kwcdn.com']");
-  if (galleryImgs.length) {
-    let maxWidth = 0;
-    let bestUrl = null;
-    for (const img of galleryImgs) {
-      const w = img.naturalWidth || img.width || 0;
-      if (w > maxWidth) {
-        maxWidth = w;
-        bestUrl = img.src;
-      }
-    }
-    if (bestUrl) return bestUrl;
-    // Fallback: first CDN image
-    return galleryImgs[0].src;
-  }
+  // Try Temu CDN images first
+  const kwImgs = Array.from(document.querySelectorAll("img[src*='kwcdn.com'], img[src*='temu.com']"));
+  const hero = kwImgs.find(img => {
+    const rect = img.getBoundingClientRect();
+    return rect.width > 200 && rect.height > 200;
+  });
+  if (hero) return hero.src;
 
-  // Fallback: try data-src
-  const lazyImg = document.querySelector("img[data-src*='img.kwcdn.com']");
-  if (lazyImg) return lazyImg.getAttribute("data-src");
-
-  return null;
+  // Fallback
+  const containerImg = document.querySelector("[class*='ProductImage'] img") ||
+                       document.querySelector("[class*='product-image'] img") ||
+                       document.querySelector("[class*='goodsImage'] img");
+  return containerImg ? containerImg.src : null;
 }

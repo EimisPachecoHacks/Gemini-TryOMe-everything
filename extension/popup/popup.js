@@ -16,6 +16,7 @@ function esc(str) {
 // State
 let pendingSignupEmail = '';
 let cachedProfile = null;
+let autoTryOnFromVoice = false; // flag to auto-trigger try-on when wardrobe opens from voice
 
 // Multi-photo upload state for wizard step 2
 let userPhotos = { body: [null, null, null], face: [null, null] };
@@ -1438,6 +1439,10 @@ async function init() {
     if (cachedProfile?.clothesSize) outfitParams.set('clothesSize', cachedProfile.clothesSize);
     if (cachedProfile?.shoesSize) outfitParams.set('shoesSize', cachedProfile.shoesSize);
     if (cachedProfile?.sex) outfitParams.set('sex', cachedProfile.sex);
+    if (autoTryOnFromVoice) {
+      outfitParams.set('autoTryOn', 'true');
+      autoTryOnFromVoice = false;
+    }
     const url = chrome.runtime.getURL('outfit-builder/wardrobe.html') + '?' + outfitParams.toString();
     chrome.tabs.create({ url });
   });
@@ -1579,16 +1584,18 @@ document.addEventListener('DOMContentLoaded', init);
   let currentOutputMsg = null; // accumulates output transcription
   let currentInputMsg = null;  // accumulates input transcription
   let reconnectAttempted = false; // prevent infinite reconnect loops
-  let resumptionHandle = null; // Gemini session resumption handle for seamless reconnect
+  // sessionResumption removed — model does not support it (causes 1008)
   let cachedSearchScreenshot = null; // screenshot of smart search results for vision
   let cachedSearchProducts = null; // product data from smart search results
+  let cachedOutfitItems = null; // outfit builder items by category for recommendations
   let recentTranscripts = []; // last few transcripts for extracting accessory mentions
 
-  // Get WebSocket URL from backend URL
-  async function getWsUrl() {
-    const stored = await chrome.storage.local.get(['backendUrl']);
-    const httpUrl = stored.backendUrl || DEFAULT_BACKEND_URL;
-    return httpUrl.replace(/^http/, 'ws') + '/ws/voice-live';
+  let pendingToolCall = false; // Audio gate — block audio during pending tool calls
+
+  // Get WebSocket URL for the Vertex AI voice proxy on our backend
+  function getWsUrl() {
+    const httpUrl = DEFAULT_BACKEND_URL;
+    return httpUrl.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/ws/voice-live';
   }
 
   // Toggle panel
@@ -1619,7 +1626,10 @@ document.addEventListener('DOMContentLoaded', init);
   });
 
   // Mic button - toggle streaming
-  micBtn.addEventListener('click', () => {
+  micBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[Giselle] 🎤 Mic button clicked, isStreaming:', isStreaming);
     if (isStreaming) {
       stopStreaming();
     } else {
@@ -1636,20 +1646,21 @@ document.addEventListener('DOMContentLoaded', init);
     return msg;
   }
 
-  // --- WebSocket connection ---
+  // --- Vertex AI WebSocket connection (via backend proxy) ---
 
   async function ensureWsConnected() {
     if (ws && ws.readyState === WebSocket.OPEN) return;
 
-    const wsUrl = await getWsUrl();
-    console.log('[Giselle] Connecting to', wsUrl);
+    const wsUrl = getWsUrl();
+    console.log('[Giselle] Connecting to Vertex AI proxy:', wsUrl);
 
     return new Promise((resolve, reject) => {
       ws = new WebSocket(wsUrl);
+      pendingToolCall = false;
 
       ws.onopen = () => {
-        console.log('[Giselle] WebSocket connected' + (resumptionHandle ? ' (resuming)' : ''));
-        // Send start message with user context from DB profile
+        console.log('[Giselle] WebSocket connected to backend proxy');
+        // Send setup message — backend handles Vertex AI auth and model config
         const userContext = {};
         if (cachedProfile) {
           userContext.name = cachedProfile.firstName || '';
@@ -1657,17 +1668,24 @@ document.addEventListener('DOMContentLoaded', init);
           userContext.shoesSize = cachedProfile.shoesSize || '';
           userContext.sex = cachedProfile.sex || '';
           userContext.language = cachedProfile.language || 'en';
+          userContext.preferences = cachedProfile.preferences || '';
         }
-        const startMsg = { type: 'start', userContext };
-        if (resumptionHandle) {
-          startMsg.resumptionHandle = resumptionHandle;
-        }
-        ws.send(JSON.stringify(startMsg));
+        ws.send(JSON.stringify({ setup: { userContext } }));
       };
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        handleServerMessage(msg, resolve);
+      ws.onmessage = async (event) => {
+        let text;
+        if (event.data instanceof Blob) {
+          text = await event.data.text();
+        } else {
+          text = event.data;
+        }
+        try {
+          const msg = JSON.parse(text);
+          handleGeminiMessage(msg, resolve);
+        } catch (e) {
+          console.warn('[Giselle] Non-JSON message, ignoring');
+        }
       };
 
       ws.onerror = (e) => {
@@ -1675,12 +1693,119 @@ document.addEventListener('DOMContentLoaded', init);
         reject(new Error('WebSocket connection failed'));
       };
 
-      ws.onclose = () => {
-        console.log('[Giselle] WebSocket closed');
+      ws.onclose = (e) => {
+        console.log('[Giselle] WebSocket closed, code:', e.code, 'reason:', e.reason || '(none)');
         ws = null;
-        if (isStreaming) stopStreaming();
+        // Auto-reconnect on unexpected close while streaming
+        if (isStreaming && !reconnectAttempted) {
+          reconnectAttempted = true;
+          const reason = e.reason || `code ${e.code}`;
+          addMessage('bot', `Session dropped (${reason}), reconnecting...`);
+          stopStreaming();
+          setTimeout(() => {
+            startStreaming().then(() => {
+              addMessage('bot', 'Reconnected! You can continue talking.');
+              reconnectAttempted = false;
+            }).catch(() => {
+              addMessage('bot', 'Could not reconnect. Click the mic to start a new conversation.');
+              reconnectAttempted = false;
+            });
+          }, 1000);
+        } else if (isStreaming) {
+          stopStreaming();
+        }
       };
     });
+  }
+
+  /**
+   * Handle raw Gemini Live API messages (direct connection format).
+   * Maps Gemini's native message format to the same handler logic.
+   */
+  function handleGeminiMessage(msg, onSetupComplete) {
+    // Setup complete
+    if (msg.setupComplete) {
+      console.log('[Giselle] Session ready (direct)');
+      if (onSetupComplete) onSetupComplete();
+      return;
+    }
+
+    // Audio data from model
+    if (msg.serverContent?.modelTurn?.parts) {
+      for (const part of msg.serverContent.modelTurn.parts) {
+        if (part.inlineData) {
+          playAudioChunk(part.inlineData.data, part.inlineData.mimeType);
+        }
+        // Suppress text parts — native audio model text is internal reasoning
+        if (part.text) {
+          console.log(`[Giselle] Suppressed thinking: "${part.text.trim().substring(0, 80)}..."`);
+        }
+      }
+    }
+
+    // Turn complete
+    if (msg.serverContent?.turnComplete) {
+      currentOutputMsg = null;
+      currentInputMsg = null;
+    }
+
+    // Barge-in / interrupted
+    if (msg.serverContent?.interrupted) {
+      stopPlayback();
+    }
+
+    // Input transcription (what the user said)
+    if (msg.serverContent?.inputTranscription?.text) {
+      // Disabled to prevent noise transcription
+    }
+
+    // Output transcription (what the model said)
+    if (msg.serverContent?.outputTranscription?.text) {
+      currentInputMsg = null;
+      const text = msg.serverContent.outputTranscription.text;
+      if (text) {
+        if (!currentOutputMsg) {
+          currentOutputMsg = addMessage('bot', text);
+        } else {
+          currentOutputMsg.textContent += text;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      }
+    }
+
+    // Tool calls — gate audio
+    if (msg.toolCall?.functionCalls) {
+      pendingToolCall = true;
+      console.log('[Giselle] 🔧 Tool calls received (audio gated):', msg.toolCall.functionCalls.map(c => `${c.name}(${JSON.stringify(c.args || {}).substring(0, 100)})`).join(', '));
+      handleToolCalls(msg.toolCall.functionCalls);
+    }
+
+    // Tool call cancellation — ungate audio
+    if (msg.toolCallCancellation?.ids) {
+      pendingToolCall = false;
+      console.warn('[Giselle] ❌ Tool calls CANCELLED:', JSON.stringify(msg.toolCallCancellation.ids));
+    }
+
+    // Server going away
+    if (msg.goAway) {
+      if (!reconnectAttempted) {
+        reconnectAttempted = true;
+        addMessage('bot', 'Session expiring, reconnecting...');
+        stopStreaming();
+        setTimeout(() => {
+          startStreaming().then(() => {
+            addMessage('bot', 'Reconnected! You can continue talking.');
+            reconnectAttempted = false;
+          }).catch(() => {
+            addMessage('bot', 'Could not reconnect. Click the mic to start a new conversation.');
+            reconnectAttempted = false;
+          });
+        }, 1000);
+      } else {
+        addMessage('bot', 'Session ending soon. Click the mic to start a new session.');
+        stopStreaming();
+      }
+    }
   }
 
   // Listen for search results from the smart search results page (for voice agent vision)
@@ -1688,6 +1813,7 @@ document.addEventListener('DOMContentLoaded', init);
     if (msg.type === 'SEARCH_RESULTS_LOADED') {
       cachedSearchProducts = msg.products || null;
       cachedSearchScreenshot = msg.screenshot || null;
+      cachedOutfitItems = null; // clear outfit cache when new search loads
       console.log('[Giselle] Cached search results:', msg.products?.length, 'screenshot:', !!msg.screenshot);
       // If voice session is active, send the screenshot to Gemini so Giselle can see the products
       if (ws && ws.readyState === WebSocket.OPEN && cachedSearchScreenshot) {
@@ -1695,122 +1821,36 @@ document.addEventListener('DOMContentLoaded', init);
           ? cachedSearchScreenshot.split(',')[1]
           : cachedSearchScreenshot;
         ws.send(JSON.stringify({
-          type: 'image',
-          data: screenshotBase64,
-          mimeType: 'image/jpeg',
-          context: `These are the smart search results showing ${msg.products?.length || 0} products. Each product has a numbered badge visible in the image. The user can ask you to recommend items based on their appearance.`,
+          clientContent: {
+            turns: [{
+              role: 'user',
+              parts: [
+                { inlineData: { data: screenshotBase64, mimeType: 'image/jpeg' } },
+                { text: `These are the smart search results showing ${msg.products?.length || 0} products. Each product has a numbered badge visible in the image. The user can ask you to recommend items based on their appearance.` },
+              ],
+            }],
+            turnComplete: false,
+          },
         }));
         console.log('[Giselle] Sent search results screenshot to voice session');
       }
     }
+    if (msg.type === 'OUTFIT_RESULTS_LOADED') {
+      cachedOutfitItems = msg.outfitItems || null;
+      console.log('[Giselle] Cached outfit items for recommendations:', msg.totalItems, 'items across', Object.keys(msg.outfitItems || {}).filter(k => (msg.outfitItems[k] || []).length > 0).join(', '));
+      // If voice session is active, tell Giselle about the outfit items
+      if (ws && ws.readyState === WebSocket.OPEN && cachedOutfitItems) {
+        const summary = Object.entries(cachedOutfitItems)
+          .filter(([, items]) => items.length > 0)
+          .map(([cat, items]) => `${cat}: ${items.length} items`)
+          .join(', ');
+        sendGeminiText(`The outfit builder has loaded with these items: ${summary}. The user can ask you to recommend the best combination of items across these categories.`);
+        console.log('[Giselle] Sent outfit items context to voice session');
+      }
+    }
   });
 
-  function handleServerMessage(msg, onSetupComplete) {
-    switch (msg.type) {
-      case 'setup_complete':
-        console.log('[Giselle] Session ready');
-        if (onSetupComplete) onSetupComplete();
-        break;
-
-      case 'audio':
-        playAudioChunk(msg.data, msg.mimeType);
-        break;
-
-      case 'turn_complete':
-        currentOutputMsg = null;
-        currentInputMsg = null;
-        break;
-
-      case 'interrupted':
-        stopPlayback();
-        break;
-
-      case 'input_transcription':
-        if (msg.text) {
-          if (!currentInputMsg) {
-            currentInputMsg = addMessage('user', msg.text);
-          } else {
-            currentInputMsg.textContent += msg.text;
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-          }
-          // Track recent user messages for accessory extraction
-          recentTranscripts.push(msg.text.toLowerCase());
-          if (recentTranscripts.length > 20) recentTranscripts.shift();
-        }
-        break;
-
-      case 'output_transcription':
-        currentInputMsg = null; // user input is done when bot starts responding
-        if (msg.text) {
-          if (!currentOutputMsg) {
-            currentOutputMsg = addMessage('bot', msg.text);
-          } else {
-            currentOutputMsg.textContent += msg.text;
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-          }
-        }
-        break;
-
-      case 'tool_call':
-        handleToolCalls(msg.functionCalls || []);
-        break;
-
-      case 'tool_call_cancellation':
-        console.log('[Giselle] Tool calls cancelled:', msg.ids);
-        break;
-
-      case 'go_away':
-        // Gemini session is expiring — store resumption handle and auto-reconnect
-        if (msg.resumptionHandle) resumptionHandle = msg.resumptionHandle;
-        if (!reconnectAttempted) {
-          reconnectAttempted = true;
-          addMessage('bot', 'Session expiring, reconnecting...');
-          stopStreaming();
-          setTimeout(() => {
-            startStreaming().then(() => {
-              addMessage('bot', 'Reconnected! You can continue talking.');
-              reconnectAttempted = false;
-            }).catch(() => {
-              addMessage('bot', 'Could not reconnect. Click the mic to start a new conversation.');
-              reconnectAttempted = false;
-              resumptionHandle = null;
-            });
-          }, 1000);
-        } else {
-          addMessage('bot', 'Session ending soon. Click the mic to start a new session.');
-          stopStreaming();
-        }
-        break;
-
-      case 'session_closed':
-        if (isStreaming && !reconnectAttempted) {
-          // Session dropped while user was talking — try to reconnect with resumption
-          reconnectAttempted = true;
-          addMessage('bot', 'Session dropped, reconnecting...');
-          stopStreaming();
-          setTimeout(() => {
-            startStreaming().then(() => {
-              addMessage('bot', 'Reconnected! You can continue talking.');
-              reconnectAttempted = false;
-            }).catch(() => {
-              addMessage('bot', 'Could not reconnect. Click the mic to start a new conversation.');
-              reconnectAttempted = false;
-              resumptionHandle = null;
-            });
-          }, 1000);
-        } else {
-          addMessage('bot', 'Voice session ended. Click the mic to start a new conversation.');
-          if (isStreaming) stopStreaming();
-          resumptionHandle = null;
-        }
-        break;
-
-      case 'error':
-        addMessage('bot', msg.message || 'Something went wrong.');
-        console.error('[Giselle] Server error:', msg.message);
-        break;
-    }
-  }
+  // handleServerMessage removed — now using handleGeminiMessage for direct connection
 
   // --- Audio capture ---
 
@@ -1828,7 +1868,7 @@ document.addEventListener('DOMContentLoaded', init);
       // Request microphone — may fail in side panel if permission not yet granted
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
+          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: true },
         });
       } catch (micErr) {
         console.warn('[Giselle] Mic permission failed in side panel:', micErr.name);
@@ -1845,6 +1885,7 @@ document.addEventListener('DOMContentLoaded', init);
 
       // Create capture AudioContext at 16kHz
       captureContext = new AudioContext({ sampleRate: 16000 });
+      console.log('[Giselle] AudioContext sampleRate:', captureContext.sampleRate);
       const source = captureContext.createMediaStreamSource(mediaStream);
 
       // Load AudioWorklet
@@ -1853,16 +1894,41 @@ document.addEventListener('DOMContentLoaded', init);
       workletNode = new AudioWorkletNode(captureContext, 'pcm-capture-processor');
 
       // Send PCM chunks to backend
+      let audioChunkCount = 0;
+      let maxAudioLevel = 0;
       workletNode.port.onmessage = (e) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (ws && ws.readyState === WebSocket.OPEN && !pendingToolCall) {
           const int16Array = new Int16Array(e.data);
+          // Track audio levels for debugging
+          for (let i = 0; i < int16Array.length; i++) {
+            const absVal = Math.abs(int16Array[i]);
+            if (absVal > maxAudioLevel) maxAudioLevel = absVal;
+          }
+          audioChunkCount++;
+          if (audioChunkCount % 100 === 0) {
+            console.log(`[Giselle] 🎙️ Audio: ${audioChunkCount} chunks sent, peak level: ${maxAudioLevel} / 32768 (${(maxAudioLevel / 32768 * 100).toFixed(1)}%), sampleRate: ${captureContext.sampleRate}`);
+            maxAudioLevel = 0;
+          }
           const base64 = int16ToBase64(int16Array);
-          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
+          // Send in Gemini's native realtimeInput format
+          ws.send(JSON.stringify({
+            realtimeInput: {
+              mediaChunks: [{
+                mimeType: 'audio/pcm;rate=16000',
+                data: base64,
+              }],
+            },
+          }));
         }
       };
 
       source.connect(workletNode);
-      workletNode.connect(captureContext.destination); // required for worklet to process
+      // Connect worklet to a silent output (gain=0) to keep processing active
+      // without playing mic audio back through speakers (which causes feedback)
+      const silentDest = captureContext.createGain();
+      silentDest.gain.value = 0;
+      silentDest.connect(captureContext.destination);
+      workletNode.connect(silentDest);
 
       // Create playback context at 24kHz for Gemini audio output
       playbackContext = new AudioContext({ sampleRate: 24000 });
@@ -1882,6 +1948,7 @@ document.addEventListener('DOMContentLoaded', init);
   }
 
   function stopStreaming() {
+    console.log('[Giselle] stopStreaming called, isStreaming:', isStreaming, 'ws:', ws?.readyState);
     // Stop audio capture
     if (workletNode) {
       workletNode.disconnect();
@@ -1896,9 +1963,18 @@ document.addEventListener('DOMContentLoaded', init);
       mediaStream = null;
     }
 
-    // Signal audio end to backend
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'audio_end' }));
+    // Close WebSocket to end the Gemini session
+    const wsRef = ws;
+    ws = null; // clear immediately to prevent re-entrant calls
+    pendingToolCall = false;
+    if (wsRef) {
+      try {
+        if (wsRef.readyState === WebSocket.OPEN || wsRef.readyState === WebSocket.CONNECTING) {
+          wsRef.close();
+        }
+      } catch (e) {
+        console.warn('[Giselle] Error closing WebSocket:', e.message);
+      }
     }
 
     stopPlayback();
@@ -1909,7 +1985,7 @@ document.addEventListener('DOMContentLoaded', init);
     currentOutputMsg = null;
     currentInputMsg = null;
 
-    console.log('[Giselle] Streaming stopped');
+    console.log('[Giselle] Streaming stopped, WebSocket closed');
   }
 
   // --- Audio playback ---
@@ -1978,14 +2054,24 @@ document.addEventListener('DOMContentLoaded', init);
 
   // --- Text message (fallback) ---
 
+  function sendGeminiText(text) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text }] }],
+          turnComplete: true,
+        },
+      }));
+    }
+  }
+
   function sendTextMessage(text) {
     addMessage('user', text);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'text', text }));
+      sendGeminiText(text);
     } else {
-      // If no WS session, start one and send text
       ensureWsConnected().then(() => {
-        ws.send(JSON.stringify({ type: 'text', text }));
+        sendGeminiText(text);
       }).catch(() => {
         addMessage('bot', 'Could not connect to voice service. Please try again.');
       });
@@ -1999,11 +2085,16 @@ document.addEventListener('DOMContentLoaded', init);
   let pendingOutfitData = null;
 
   function handleToolCalls(functionCalls) {
-    // Helper to send a single tool response back to Gemini
+    // Helper to send a single tool response back to Gemini (native format)
     function sendToolResp(callId, callName, result) {
-      const toolResp = [{ id: callId, name: callName, response: { result } }];
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'tool_response', functionResponses: toolResp }));
+        ws.send(JSON.stringify({
+          toolResponse: {
+            functionResponses: [{ id: callId, name: callName, response: { result } }],
+          },
+        }));
+        pendingToolCall = false; // Ungate audio after tool response
+        console.log(`[Giselle] Tool response sent for ${callName} — audio ungated`);
       }
     }
 
@@ -2051,9 +2142,11 @@ document.addEventListener('DOMContentLoaded', init);
         }
         case 'build_outfit': {
           // Guard: if no accessories provided, bounce back to Gemini to ask the user
+          // Skip guard for thinking-based synthetic calls — they can't send tool responses back
+          const isSyntheticCall = call.id && call.id.startsWith('thinking-');
           const hasAccessories = data.necklace || data.earrings || data.bracelet;
           const itemCount = [data.top, data.bottom, data.shoes, data.necklace, data.earrings, data.bracelet].filter(Boolean).length;
-          if (!hasAccessories && !outfitConfirmedNoAccessories) {
+          if (!isSyntheticCall && !hasAccessories && !outfitConfirmedNoAccessories) {
             // First call without accessories — tell Gemini to ask about them
             outfitConfirmedNoAccessories = false; // reset
             const missing = [];
@@ -2091,7 +2184,8 @@ document.addEventListener('DOMContentLoaded', init);
                 }
               }
             }
-            // Auto-click build button after filling fields
+            // Auto-click build button after filling fields — flag auto try-on
+            autoTryOnFromVoice = true;
             document.getElementById('outfitBuildBtn')?.click();
           }, 300);
           sendToolResp(call.id, call.name, 'Outfit builder started with items');
@@ -2153,9 +2247,26 @@ document.addEventListener('DOMContentLoaded', init);
         case 'save_to_favorites': {
           // Send message to content script to save the current try-on result
           sendMsg({ type: 'SAVE_TO_FAVORITES' }).then((result) => {
-            sendToolResp(call.id, call.name, result?.success ? 'Saved to favorites' : 'Saved to favorites');
+            if (result?.success === false) {
+              sendToolResp(call.id, call.name, result.error || 'No try-on result to save. Try on an item first.');
+            } else {
+              sendToolResp(call.id, call.name, 'Saved to favorites successfully!');
+            }
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No try-on result to save. Try on an item first.');
+          });
+          continue; // async — response sent in .then/.catch
+        }
+        case 'animate': {
+          // Trigger animate button on the current try-on result
+          sendMsg({ type: 'ANIMATE_TRYON' }).then((result) => {
+            if (result?.success === false) {
+              sendToolResp(call.id, call.name, result.error || 'No try-on result to animate. Try on an item first.');
+            } else {
+              sendToolResp(call.id, call.name, 'Animation started! The video is being generated — this takes about 30-60 seconds.');
+            }
+          }).catch(() => {
+            sendToolResp(call.id, call.name, 'No try-on result to animate. Try on an item first.');
           });
           continue; // async — response sent in .then/.catch
         }
@@ -2174,70 +2285,171 @@ document.addEventListener('DOMContentLoaded', init);
           continue;
         }
         case 'recommend_items': {
-          // Use backend vision API to analyze user photo + search screenshot
-          addMessage('bot', 'Let me analyze these products for you...');
+          const isOutfitMode = !!cachedOutfitItems && Object.values(cachedOutfitItems).some(arr => arr.length > 0);
+          console.log('[recommend_items] 🎯 Tool called! mode:', isOutfitMode ? 'OUTFIT' : 'SEARCH', 'cachedScreenshot:', !!cachedSearchScreenshot, 'cachedProducts:', cachedSearchProducts?.length || 0, 'cachedOutfitItems:', isOutfitMode ? Object.entries(cachedOutfitItems).filter(([,v]) => v.length > 0).map(([k,v]) => `${k}:${v.length}`).join(',') : 'none');
 
-          // If no cached screenshot, capture one on-the-fly from the active tab
-          const captureAndRecommend = async () => {
-            let screenshot = cachedSearchScreenshot;
-            let products = cachedSearchProducts;
-            if (!screenshot) {
-              console.log('[recommend_items] No cached screenshot, capturing on-the-fly...');
+          if (isOutfitMode) {
+            // OUTFIT BUILDER MODE: recommend best combination of items across 6 categories
+            addMessage('bot', 'Let me find the perfect outfit combination for you...');
+
+            const outfitRecommend = async () => {
+              // Get user's body photo
+              const photos = await sendMsg({ type: 'GET_USER_PHOTOS' });
+              const userPhoto = photos?.bodyPhoto || null;
+              const userProfile = cachedProfile ? { sex: cachedProfile.sex, clothesSize: cachedProfile.clothesSize } : {};
+
+              // Also capture screenshot of the outfit builder
+              let screenshot = null;
               try {
                 const captureResp = await new Promise((resolve) => {
                   chrome.runtime.sendMessage({ type: 'CAPTURE_TAB_SCREENSHOT' }, resolve);
                 });
                 screenshot = captureResp?.data || null;
+                console.log('[recommend_items] 📸 Outfit builder screenshot:', screenshot ? `${(screenshot.length / 1024).toFixed(0)}KB` : 'null');
               } catch (e) {
-                console.warn('[recommend_items] Screenshot capture failed:', e);
+                console.warn('[recommend_items] ⚠️ Outfit screenshot capture failed:', e);
               }
-            }
-            if (!screenshot) {
-              sendToolResp(call.id, call.name, 'No search results visible. Ask the user to search for products first.');
-              return;
-            }
-            // Get user's body photo for skin tone / body type analysis
-            const photos = await sendMsg({ type: 'GET_USER_PHOTOS' });
-            const userPhoto = photos?.bodyPhoto || null;
-            const userProfile = cachedProfile ? { sex: cachedProfile.sex, clothesSize: cachedProfile.clothesSize } : {};
-            try {
-              const resp = await fetch(`${DEFAULT_BACKEND_URL}/api/recommend`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  userPhoto: userPhoto || null,
-                  screenshot,
-                  products: products || [],
-                  userProfile,
-                }),
-              });
-              const result = await resp.json();
-              if (result.recommendations && result.recommendations.length > 0) {
-                const recText = result.recommendations
-                  .slice(0, 5)
-                  .map(r => `Item #${r.number} (score ${r.score}/10): ${r.reason}`)
-                  .join('\n');
+
+              // Build structured product list per category
+              const categoryLists = Object.entries(cachedOutfitItems)
+                .filter(([, items]) => items.length > 0)
+                .map(([cat, items]) => {
+                  const itemList = items.map(p => `  #${p.number}: "${p.title}" — ${p.price || 'no price'}`).join('\n');
+                  return `${cat.toUpperCase()} (${items.length} items):\n${itemList}`;
+                }).join('\n\n');
+
+              try {
+                const resp = await fetch(`${DEFAULT_BACKEND_URL}/api/recommend`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    userPhoto: userPhoto || null,
+                    screenshot: screenshot || null,
+                    products: [], // not used for outfit mode
+                    userProfile,
+                    outfitMode: true,
+                    outfitItems: cachedOutfitItems,
+                  }),
+                });
+                const result = await resp.json();
+                console.log('[recommend_items] 📊 Outfit API response:', JSON.stringify(result).substring(0, 500));
+                if (result.outfitCombination) {
+                  // Auto-select recommended items in wardrobe (don't rely on voice model)
+                  const picks = Object.entries(result.outfitCombination).filter(([, v]) => v && v.number);
+                  picks.forEach(([cat, pick], i) => {
+                    setTimeout(() => {
+                      chrome.runtime.sendMessage({
+                        type: 'VOICE_SELECT_OUTFIT_ITEMS',
+                        category: cat,
+                        number: pick.number,
+                      });
+                    }, i * 250);
+                  });
+
+                  const comboText = Object.entries(result.outfitCombination)
+                    .filter(([, v]) => v)
+                    .map(([cat, pick]) => `${cat}: #${pick.number} — ${pick.reason}`)
+                    .join('\n');
+                  console.log('[recommend_items] Sending outfit combination back to Gemini + auto-selecting', picks.length, 'items');
+                  sendToolResp(call.id, call.name,
+                    `Here is my recommended outfit combination based on your body type and skin tone:\n${comboText}\n${result.overallReason ? '\nOverall: ' + result.overallReason : ''}\n\nTell the user the recommended item NUMBER for each category and explain WHY this combination works for them. Mention specific item numbers so they can select them.`
+                  );
+                } else if (result.recommendations && result.recommendations.length > 0) {
+                  // Fallback to flat recommendations
+                  const recText = result.recommendations
+                    .slice(0, 8)
+                    .map(r => `${r.category ? r.category + ' ' : ''}#${r.number} (score ${r.score}/10): ${r.reason}`)
+                    .join('\n');
+                  sendToolResp(call.id, call.name,
+                    `Here are my personalized recommendations:\n${recText}\n\nTell the user these recommendations naturally, mentioning specific item numbers per category.`
+                  );
+                } else {
+                  console.warn('[recommend_items] ⚠️ No outfit combination in response');
+                  // Fallback: send structured product data as text
+                  sendToolResp(call.id, call.name,
+                    `I could not fully analyze the images but here are the outfit items available:\n\n${categoryLists}\n\nRecommend the best combination based on color coordination, style matching, and your fashion expertise. Pick ONE item per category.`
+                  );
+                }
+              } catch (err) {
+                console.error('[recommend_items] ❌ Outfit API error:', err);
                 sendToolResp(call.id, call.name,
-                  `Here are my personalized recommendations based on visual analysis:\n${recText}\n\nTell the user these recommendations naturally, mentioning specific item numbers and why each suits them.`
+                  `Vision analysis failed, but here are the outfit items:\n\n${categoryLists}\n\nRecommend the best combination based on color coordination and style matching. Pick ONE item per category.`
                 );
-              } else {
-                sendToolResp(call.id, call.name, 'Could not generate recommendations. Ask the user to try again.');
               }
-            } catch (err) {
-              console.error('[recommend_items] API error:', err);
-              // Fallback: send product list as text
-              const productSummary = (products || []).map(p =>
-                `#${p.number}: ${p.title} — ${p.price}`
-              ).join('\n');
-              sendToolResp(call.id, call.name,
-                `Vision analysis failed. Here are the products for reference:\n${productSummary}\nRecommend based on the titles and your fashion expertise.`
-              );
-            }
-          };
-          captureAndRecommend().catch((err) => {
-            console.error('[recommend_items] Error:', err);
-            sendToolResp(call.id, call.name, 'Failed to analyze products. Ask the user to try again.');
-          });
+            };
+            outfitRecommend().catch((err) => {
+              console.error('[recommend_items] Outfit error:', err);
+              sendToolResp(call.id, call.name, 'Failed to analyze outfit items. Ask the user to try again.');
+            });
+          } else {
+            // SMART SEARCH MODE: recommend individual items from search results
+            addMessage('bot', 'Let me analyze these products for you...');
+
+            const captureAndRecommend = async () => {
+              let screenshot = cachedSearchScreenshot;
+              let products = cachedSearchProducts;
+              if (!screenshot) {
+                console.log('[recommend_items] ⚠️ No cached screenshot, capturing on-the-fly...');
+                try {
+                  const captureResp = await new Promise((resolve) => {
+                    chrome.runtime.sendMessage({ type: 'CAPTURE_TAB_SCREENSHOT' }, resolve);
+                  });
+                  screenshot = captureResp?.data || null;
+                  console.log('[recommend_items] 📸 On-the-fly capture result:', screenshot ? `${(screenshot.length / 1024).toFixed(0)}KB` : 'null');
+                } catch (e) {
+                  console.warn('[recommend_items] ❌ Screenshot capture failed:', e);
+                }
+              }
+              if (!screenshot) {
+                console.warn('[recommend_items] ❌ No screenshot available at all — cannot recommend');
+                sendToolResp(call.id, call.name, 'No search results visible. Ask the user to search for products first.');
+                return;
+              }
+              console.log('[recommend_items] ✅ Have screenshot, calling /api/recommend...');
+              const photos = await sendMsg({ type: 'GET_USER_PHOTOS' });
+              const userPhoto = photos?.bodyPhoto || null;
+              const userProfile = cachedProfile ? { sex: cachedProfile.sex, clothesSize: cachedProfile.clothesSize } : {};
+              try {
+                const resp = await fetch(`${DEFAULT_BACKEND_URL}/api/recommend`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    userPhoto: userPhoto || null,
+                    screenshot,
+                    products: products || [],
+                    userProfile,
+                  }),
+                });
+                const result = await resp.json();
+                console.log('[recommend_items] 📊 API response:', JSON.stringify(result).substring(0, 300));
+                if (result.recommendations && result.recommendations.length > 0) {
+                  const recText = result.recommendations
+                    .slice(0, 5)
+                    .map(r => `Item #${r.number} (score ${r.score}/10): ${r.reason}`)
+                    .join('\n');
+                  console.log('[recommend_items] ✅ Sending', result.recommendations.length, 'recommendations back to Gemini');
+                  sendToolResp(call.id, call.name,
+                    `Here are my personalized recommendations based on visual analysis:\n${recText}\n\nTell the user these recommendations naturally, mentioning specific item numbers and why each suits them.`
+                  );
+                } else {
+                  console.warn('[recommend_items] ⚠️ No recommendations in response');
+                  sendToolResp(call.id, call.name, 'Could not generate recommendations. Ask the user to try again.');
+                }
+              } catch (err) {
+                console.error('[recommend_items] ❌ API error:', err);
+                const productSummary = (products || []).map(p =>
+                  `#${p.number}: ${p.title} — ${p.price}`
+                ).join('\n');
+                sendToolResp(call.id, call.name,
+                  `Vision analysis failed. Here are the products for reference:\n${productSummary}\nRecommend based on the titles and your fashion expertise.`
+                );
+              }
+            };
+            captureAndRecommend().catch((err) => {
+              console.error('[recommend_items] Error:', err);
+              sendToolResp(call.id, call.name, 'Failed to analyze products. Ask the user to try again.');
+            });
+          }
           continue; // async
         }
         case 'select_search_item': {

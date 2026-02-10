@@ -67,18 +67,14 @@
       if (stored.tryOnFraming) currentFraming = stored.tryOnFraming;
     } catch (_) {}
 
-    // 1. Scrape the product page (retry if Temu hasn't loaded real images yet)
+    // 1. Scrape the product page (retry for SPA sites like Temu that render lazily)
     productData = scrapeProductData();
-    if (!productData.imageUrl || productData.imageUrl.startsWith("data:")) {
-      // Temu lazy-loads images — wait up to 5s for a real CDN image
-      const host = window.location.hostname;
-      if (host.includes("temu.")) {
-        console.log("[GeminiTryOnMe] Temu: waiting for real product image to load...");
-        for (let attempt = 0; attempt < 10; attempt++) {
-          await new Promise(r => setTimeout(r, 500));
-          productData = scrapeProductData();
-          if (productData.imageUrl && !productData.imageUrl.startsWith("data:")) break;
-        }
+    if (!productData.imageUrl) {
+      const maxRetries = 10;
+      for (let i = 0; i < maxRetries; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        productData = scrapeProductData();
+        if (productData.imageUrl) break;
       }
     }
     if (!productData.imageUrl || productData.imageUrl.startsWith("data:")) {
@@ -153,6 +149,18 @@
         sendResponse({ success: true });
       } else {
         sendResponse({ success: false, error: "No unsaved try-on result found" });
+      }
+      return false;
+    }
+
+    // Voice agent: animate try-on result
+    if (msg.type === "ANIMATE_TRYON") {
+      const animateBtn = document.querySelector(".nova-tryon-animate-btn:not(:disabled)");
+      if (animateBtn) {
+        animateBtn.click();
+        sendResponse({ success: true });
+      } else {
+        sendResponse({ success: false, error: "No try-on result to animate" });
       }
       return false;
     }
@@ -461,21 +469,13 @@
     const siteConfig = getSiteConfig();
     let imageContainer = null;
     const host = window.location.hostname;
+    let useFixedOverlay = false;
 
+    // Temu uses deeply nested containers with overflow:hidden and hashed class names
+    // that clip our absolute-positioned overlay. Always use fixed modal on Temu.
     if (host.includes("temu.")) {
-      // Temu: walk up from kwcdn image to find a suitable container
-      const temuImgs = Array.from(document.querySelectorAll("img[src*='kwcdn.com'], img[src*='temu.com']"));
-      const largeTemu = temuImgs.find(img => { const r = img.getBoundingClientRect(); return r.width > 200 && r.height > 200; });
-      const anchorImg = largeTemu || temuImgs[0];
-      if (anchorImg) {
-        let el = anchorImg.parentElement;
-        for (let i = 0; i < 5 && el && el !== document.body; i++) {
-          const r = el.getBoundingClientRect();
-          if (r.width > 300 && r.height > 300) { imageContainer = el; break; }
-          el = el.parentElement;
-        }
-        if (!imageContainer) imageContainer = anchorImg.parentElement;
-      }
+      useFixedOverlay = true;
+      imageContainer = document.body;
     } else {
       imageContainer = document.querySelector(siteConfig.imageContainer);
     }
@@ -492,17 +492,20 @@
       return;
     }
 
-    // Ensure relative positioning so absolute overlay works
-    const containerStyle = window.getComputedStyle(imageContainer);
-    if (containerStyle.position === "static") {
-      imageContainer.style.position = "relative";
+    // Ensure relative positioning so absolute overlay works (skip for fixed overlay)
+    if (!useFixedOverlay) {
+      const containerStyle = window.getComputedStyle(imageContainer);
+      if (containerStyle.position === "static") {
+        imageContainer.style.position = "relative";
+      }
     }
 
     // Create overlay card
     const card = document.createElement("div");
     card.className = "nova-tryon-overlay-card";
-    card.setAttribute("tabindex", "-1"); // Prevent Temu's autofocus management from interfering
-    card.setAttribute("data-nova-tryon", "true"); // Mark as our element so Temu's React doesn't manage it
+    if (useFixedOverlay) {
+      card.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;width:400px;max-height:90vh;overflow:auto;";
+    }
     card.innerHTML = `
       <div class="nova-tryon-overlay-header">
         <h3>Gemini TryOnMe Everything</h3>
@@ -707,6 +710,11 @@
         );
         resultImage = response.resultImage;
         debugInfo = response.debug;
+        // Merge backend styleTips into analysisResult if missing locally
+        if (response.styleTips && response.styleTips.length > 0 && (!analysisResult || !analysisResult.styleTips || analysisResult.styleTips.length === 0)) {
+          if (!analysisResult) analysisResult = {};
+          analysisResult.styleTips = response.styleTips;
+        }
 
         // Log all backend pipeline steps
         logDebugSteps(debugInfo);
@@ -735,41 +743,12 @@
         return;
       }
 
-      // If overlay card was detached from DOM (e.g. Temu React re-render), re-append it
+      // If overlay card was detached from DOM (SPA re-render), re-append it
       if (!card.isConnected) {
-        console.warn("[GeminiTryOnMe] Overlay card was detached from DOM, re-appending...");
-        const siteConfig = getSiteConfig();
-        const host = window.location.hostname;
-        let container = null;
-        if (host.includes("temu.")) {
-          const temuImgs = Array.from(document.querySelectorAll("img[src*='kwcdn.com'], img[src*='temu.com']"));
-          const largeTemu = temuImgs.find(img => { const r = img.getBoundingClientRect(); return r.width > 200 && r.height > 200; });
-          const anchorImg = largeTemu || temuImgs[0];
-          if (anchorImg) {
-            let el = anchorImg.parentElement;
-            for (let i = 0; i < 5 && el && el !== document.body; i++) {
-              const r = el.getBoundingClientRect();
-              if (r.width > 300 && r.height > 300) { container = el; break; }
-              el = el.parentElement;
-            }
-            if (!container) container = anchorImg.parentElement;
-          }
-        } else {
-          container = document.querySelector(siteConfig.imageContainer);
-        }
-        if (!container) {
-          const imgs = Array.from(document.querySelectorAll("img"));
-          const largeImg = imgs.find(img => { const r = img.getBoundingClientRect(); return r.width > 200 && r.height > 200; });
-          if (largeImg) container = largeImg.closest("div");
-        }
-        if (container) {
-          const containerStyle = window.getComputedStyle(container);
-          if (containerStyle.position === "static") container.style.position = "relative";
-          container.appendChild(card);
-          overlayCard = card;
-        } else {
-          console.error("[GeminiTryOnMe] Could not find container to re-append overlay");
-        }
+        console.warn("[GeminiTryOnMe] Overlay card was detached from DOM, re-appending to body...");
+        card.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;width:400px;max-height:90vh;overflow:auto;";
+        document.body.appendChild(card);
+        overlayCard = card;
       }
 
       // Display the result (minimal overlay — controls are in the side panel)
@@ -811,39 +790,12 @@
         </button>
       `;
 
-      // After setting innerHTML, check AGAIN if card was detached (Temu React re-render race)
+      // If card was detached during render (SPA re-render race), re-append as fixed modal
       if (!card.isConnected) {
-        console.warn("[GeminiTryOnMe] Card detached during result render, re-appending...");
-        const host = window.location.hostname;
-        let reContainer = null;
-        if (host.includes("temu.")) {
-          const temuImgs = Array.from(document.querySelectorAll("img[src*='kwcdn.com'], img[src*='temu.com']"));
-          const largeTemu = temuImgs.find(img => { const r = img.getBoundingClientRect(); return r.width > 200 && r.height > 200; });
-          const anchorImg = largeTemu || temuImgs[0];
-          if (anchorImg) {
-            let el = anchorImg.parentElement;
-            for (let i = 0; i < 5 && el && el !== document.body; i++) {
-              const r = el.getBoundingClientRect();
-              if (r.width > 300 && r.height > 300) { reContainer = el; break; }
-              el = el.parentElement;
-            }
-            if (!reContainer) reContainer = anchorImg.parentElement;
-          }
-        } else {
-          const siteConfig = getSiteConfig();
-          reContainer = document.querySelector(siteConfig.imageContainer);
-        }
-        if (!reContainer) {
-          const imgs = Array.from(document.querySelectorAll("img"));
-          const largeImg = imgs.find(img => { const r = img.getBoundingClientRect(); return r.width > 200 && r.height > 200; });
-          if (largeImg) reContainer = largeImg.closest("div");
-        }
-        if (reContainer) {
-          const cs = window.getComputedStyle(reContainer);
-          if (cs.position === "static") reContainer.style.position = "relative";
-          reContainer.appendChild(card);
-          overlayCard = card;
-        }
+        console.warn("[GeminiTryOnMe] Card detached during result render, re-appending as fixed modal...");
+        card.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99999;width:400px;max-height:90vh;overflow:auto;";
+        document.body.appendChild(card);
+        overlayCard = card;
       }
 
       // Store debug images — fetch the actual pose used from backend

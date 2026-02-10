@@ -25,6 +25,9 @@ let tryOnTimerInterval = null;
 let lastTryOnResultBase64 = null;
 let lastVideoSrc = null;
 
+// Store loaded products per category for voice agent recommendations
+const loadedCategoryProducts = { top: [], bottom: [], shoes: [], necklace: [], earrings: [], bracelets: [] };
+
 // Non-blocking toast notification
 function showPageToast(msg, duration = 3500) {
   let toast = document.getElementById('nova-wardrobe-toast');
@@ -165,6 +168,41 @@ async function initWardrobe() {
 
   stopTimer();
   showWardrobe();
+
+  // Notify voice agent with all outfit items for recommendations
+  const totalItems = Object.values(loadedCategoryProducts).reduce((sum, arr) => sum + arr.length, 0);
+  if (totalItems > 0) {
+    chrome.runtime.sendMessage({
+      type: "OUTFIT_RESULTS_LOADED",
+      outfitItems: loadedCategoryProducts,
+      totalItems,
+    });
+    console.log(`[Wardrobe] Sent ${totalItems} outfit items to voice agent for recommendations`);
+  }
+
+  // Auto try-on if requested by voice agent (autoTryOn URL param)
+  const autoTryOn = params.get("autoTryOn") === "true";
+  if (autoTryOn && totalItems > 0) {
+    console.log("[Wardrobe] Auto try-on enabled — selecting first item per category");
+    const autoContainerMap = {
+      top: "topsContainer", bottom: "bottomsContainer", shoes: "shoesContainer",
+      necklace: "necklaceContainer", earrings: "earringsContainer", bracelets: "braceletsContainer",
+    };
+    for (const [, containerId] of Object.entries(autoContainerMap)) {
+      const container = document.getElementById(containerId);
+      if (container) {
+        const firstItem = container.querySelector(".hanger-item, .shoe-display, .accessory-item");
+        if (firstItem) firstItem.click();
+      }
+    }
+    setTimeout(() => {
+      const tryOnBtn = document.getElementById("tryOnBtn");
+      if (tryOnBtn && !tryOnBtn.disabled) {
+        console.log("[Wardrobe] Auto-triggering try-on");
+        handleTryOn();
+      }
+    }, 500);
+  }
 }
 
 async function searchCategory(category, query) {
@@ -289,6 +327,16 @@ function renderCategory(category, products) {
 
   const items = products.slice(0, maxItems);
   const isAccessory = ["necklace", "earrings", "bracelets"].includes(category);
+
+  // Cache products for voice agent recommendations
+  loadedCategoryProducts[category] = items.map((p, i) => ({
+    number: i + 1,
+    title: p.title || "",
+    price: p.price || "",
+    image_url: p.image_url || "",
+    product_url: p.product_url || "",
+    category,
+  }));
 
   items.forEach((product, idx) => {
     if (isAccessory) {
