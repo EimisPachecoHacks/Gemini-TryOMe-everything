@@ -180,29 +180,6 @@ async function initWardrobe() {
     console.log(`[Wardrobe] Sent ${totalItems} outfit items to voice agent for recommendations`);
   }
 
-  // Auto try-on if requested by voice agent (autoTryOn URL param)
-  const autoTryOn = params.get("autoTryOn") === "true";
-  if (autoTryOn && totalItems > 0) {
-    console.log("[Wardrobe] Auto try-on enabled — selecting first item per category");
-    const autoContainerMap = {
-      top: "topsContainer", bottom: "bottomsContainer", shoes: "shoesContainer",
-      necklace: "necklaceContainer", earrings: "earringsContainer", bracelets: "braceletsContainer",
-    };
-    for (const [, containerId] of Object.entries(autoContainerMap)) {
-      const container = document.getElementById(containerId);
-      if (container) {
-        const firstItem = container.querySelector(".hanger-item, .shoe-display, .accessory-item");
-        if (firstItem) firstItem.click();
-      }
-    }
-    setTimeout(() => {
-      const tryOnBtn = document.getElementById("tryOnBtn");
-      if (tryOnBtn && !tryOnBtn.disabled) {
-        console.log("[Wardrobe] Auto-triggering try-on");
-        handleTryOn();
-      }
-    }, 500);
-  }
 }
 
 async function searchCategory(category, query) {
@@ -1098,6 +1075,18 @@ function sendMessage(msg) {
 
 // Voice agent outfit item selection
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "VOICE_TRY_ON_OUTFIT") {
+    const tryOnBtn = document.getElementById("tryOnBtn");
+    if (tryOnBtn && !tryOnBtn.disabled) {
+      console.log("[Wardrobe] Voice triggering outfit try-on");
+      handleTryOn();
+      sendResponse({ status: "ok" });
+    } else {
+      sendResponse({ status: "not_ready", error: "Try On button is disabled — select at least a top and bottom first" });
+    }
+    return true;
+  }
+
   if (message.type === "VOICE_SELECT_OUTFIT_ITEMS") {
     const cat = message.category;
     const num = message.number;

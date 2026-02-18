@@ -61,7 +61,6 @@ app.use("/api/try-on", aiLimiter);
 app.use("/api/cosmetics", aiLimiter);
 app.use("/api/accessories", aiLimiter);
 app.use("/api/video", aiLimiter);
-app.use("/api/image", aiLimiter);
 app.use("/api/analyze", aiLimiter);
 app.use("/api/smart-search", aiLimiter);
 app.use("/api/recommend", aiLimiter);

@@ -21,7 +21,7 @@ describe("Voice Agent — Tool Declarations", () => {
 
   test("declares exactly 8 tools", () => {
     const toolNames = [...source.matchAll(/name:\s*"(\w+)"/g)].map((m) => m[1]);
-    expect(toolNames).toHaveLength(12);
+    expect(toolNames).toHaveLength(13);
   });
 
   test("includes all required tool names", () => {

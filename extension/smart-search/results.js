@@ -641,6 +641,7 @@ function showTryOnResult(base64Image, product, styleTips) {
   const animateDiv = document.createElement("div");
   animateDiv.style.cssText = "text-align:center; margin-top:8px;";
   const animateBtn = document.createElement("button");
+  animateBtn.id = "tryOnAnimateBtn";
   animateBtn.className = "nova-btn nova-btn-primary";
   animateBtn.innerHTML = "&#9654; Animate";
   animateBtn.addEventListener("click", () => handleAnimate(body, base64Image, animateBtn, product));
@@ -700,6 +701,7 @@ async function handleAnimate(body, resultImageBase64, btn, product) {
 
     // Save button
     const saveBtn = document.createElement("button");
+    saveBtn.id = "tryOnSaveVideoBtn";
     saveBtn.className = "nova-btn nova-btn-primary";
     saveBtn.textContent = "Save";
     saveBtn.addEventListener("click", async () => {
@@ -812,12 +814,15 @@ function closeTryOnModal() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Voice agent: animate try-on result
   if (message.type === "ANIMATE_TRYON") {
-    const animateBtn = document.querySelector(".nova-btn.nova-btn-primary:not(:disabled)");
-    if (animateBtn && animateBtn.textContent.includes("Animate")) {
+    const animateBtn = document.getElementById("tryOnAnimateBtn");
+    if (animateBtn && !animateBtn.disabled) {
       animateBtn.click();
       sendResponse({ success: true });
     } else {
-      sendResponse({ success: false, error: "No try-on result to animate" });
+      // Also check if modal is open at all
+      const modal = document.getElementById("tryOnModal");
+      const isModalOpen = modal && !modal.hidden;
+      sendResponse({ success: false, error: isModalOpen ? "Animate button not available (video may already be generating)" : "No try-on result to animate. Try on an item first." });
     }
     return false;
   }
@@ -830,6 +835,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true });
     } else {
       sendResponse({ success: false, error: "No unsaved try-on result found" });
+    }
+    return false;
+  }
+
+  // Voice agent: save video
+  if (message.type === "SAVE_VIDEO") {
+    const saveBtn = document.getElementById("tryOnSaveVideoBtn");
+    if (saveBtn && !saveBtn.disabled) {
+      saveBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: "No video to save. Generate a video first." });
     }
     return false;
   }

@@ -239,8 +239,9 @@ function handleGeminiMessage(ws, msg) {
     });
   }
 
-  // Tool calls — gate audio
+  // Tool calls — gate audio input while tool is being processed
   if (msg.toolCall?.functionCalls) {
+    pendingToolCall = true;
     sendToClient(ws, {
       toolCall: { functionCalls: msg.toolCall.functionCalls },
     });

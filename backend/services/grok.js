@@ -43,12 +43,12 @@ async function generateVideo(imageBase64, prompt, sex) {
   const pronoun = sex === "male" ? "He" : "She";
   const possessive = sex === "male" ? "his" : "her";
   const defaultPrompt =
-    `Animate the person in the image as a professional fashion model presenting ${possessive} outfit on a runway photoshoot. ` +
-    `${pronoun} confidently poses and slowly transitions between elegant poses — turning slightly, shifting weight, ` +
-    `tilting head, and adjusting posture to showcase the clothing from different angles. ` +
-    "The movements should be smooth, natural, and graceful like a high-end fashion commercial. " +
-    "CRITICAL: Keep the person's face, facial features, and body EXACTLY as shown in the image — do not alter or exaggerate any features. " +
-    "Add stylish upbeat fashion runway background music with a modern, confident vibe.";
+    `The exact same person from the image slowly poses for a fashion photoshoot. ` +
+    `${pronoun} makes subtle, gentle movements — a slight turn, a small weight shift, a soft head tilt — ` +
+    `to show off the outfit from slightly different angles. ` +
+    "Movements are minimal, slow, and elegant. The person stays mostly in place. " +
+    "CRITICAL: The person's face, skin tone, hair, body shape, and all physical features must remain IDENTICAL to the input image throughout the entire video. Do NOT change, morph, or alter the person's appearance in any way. " +
+    "Soft, ambient fashion music in the background.";
 
   const { request_id } = await fal.queue.submit(MODEL_ID, {
     input: {

@@ -384,41 +384,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
 
-        case "SAVE_TO_FAVORITES": {
-          // Forward to active tab's content script to trigger the save-to-favorites button
-          const [favTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (favTab?.id) {
-            chrome.tabs.sendMessage(favTab.id, { type: "SAVE_TO_FAVORITES" }, (res) => {
-              sendResponse({ data: res || { success: true } });
-            });
-          } else {
-            sendResponse({ error: "No active tab found" });
-          }
-          break;
-        }
-
-        case "ANIMATE_TRYON": {
-          // Forward to active tab's content script to trigger the animate button
-          const [animTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (animTab?.id) {
-            chrome.tabs.sendMessage(animTab.id, { type: "ANIMATE_TRYON" }, (res) => {
-              sendResponse({ data: res || { success: true } });
-            });
-          } else {
-            sendResponse({ error: "No active tab found" });
-          }
-          break;
-        }
-
+        case "SAVE_TO_FAVORITES":
+        case "ANIMATE_TRYON":
         case "SAVE_VIDEO": {
-          // Forward to active tab's content script to trigger the save-video button
-          const [vidTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (vidTab?.id) {
-            chrome.tabs.sendMessage(vidTab.id, { type: "SAVE_VIDEO" }, (res) => {
-              sendResponse({ data: res || { success: true } });
+          // Try smart search results tab first (where try-on results are shown),
+          // then fall back to active tab (for Amazon product page try-ons)
+          const voiceAllTabs = await chrome.tabs.query({});
+          const searchResultsTab = voiceAllTabs
+            .filter(t => t.url && t.url.includes("smart-search/results.html"))
+            .sort((a, b) => b.id - a.id)[0];
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const targetTab = searchResultsTab || activeTab;
+          if (targetTab?.id) {
+            console.log(`[background] ${message.type} → tab ${targetTab.id} (${searchResultsTab ? 'search results' : 'active tab'})`);
+            chrome.tabs.sendMessage(targetTab.id, { type: message.type }, (res) => {
+              if (chrome.runtime.lastError) {
+                console.warn(`[background] ${message.type} failed:`, chrome.runtime.lastError.message);
+                sendResponse({ data: { success: false, error: "Content script not ready" } });
+              } else {
+                sendResponse({ data: res || { success: true } });
+              }
             });
           } else {
-            sendResponse({ error: "No active tab found" });
+            sendResponse({ error: "No tab found" });
           }
           break;
         }
@@ -461,14 +449,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             .sort((a, b) => b.id - a.id)[0];
           if (searchTab) {
             console.log("[background] ✅ Found search results tab:", searchTab.id, searchTab.url?.substring(0, 80));
-            chrome.tabs.sendMessage(searchTab.id, {
-              type: "VOICE_SELECT_SEARCH_ITEM",
-              number: message.number,
-            });
-            sendResponse({ data: { status: "ok" } });
+            try {
+              chrome.tabs.sendMessage(searchTab.id, {
+                type: "VOICE_SELECT_SEARCH_ITEM",
+                number: message.number,
+              }, (resp) => {
+                if (chrome.runtime.lastError) {
+                  console.warn("[background] ⚠️ Content script not ready:", chrome.runtime.lastError.message);
+                  sendResponse({ data: { status: "not_found" } });
+                } else {
+                  sendResponse({ data: resp || { status: "not_found" } });
+                }
+              });
+            } catch (e) {
+              console.warn("[background] ⚠️ Failed to send to search tab:", e.message);
+              sendResponse({ data: { status: "not_found" } });
+            }
           } else {
             console.warn("[background] ⚠️ No smart-search/results.html tab found among", allTabs.length, "tabs");
             sendResponse({ data: { status: "no_tab" } });
+          }
+          break;
+        }
+
+        case "VOICE_TRY_ON_OUTFIT": {
+          // Route to the outfit builder wardrobe tab to trigger try-on
+          console.log("[background] 🎯 VOICE_TRY_ON_OUTFIT");
+          const tryOnTabs = await chrome.tabs.query({});
+          const tryOnTab = tryOnTabs
+            .filter(t => t.url && t.url.includes("outfit-builder/wardrobe.html"))
+            .sort((a, b) => b.id - a.id)[0];
+          if (tryOnTab) {
+            chrome.tabs.sendMessage(tryOnTab.id, { type: "VOICE_TRY_ON_OUTFIT" }, (res) => {
+              sendResponse({ data: res || { status: "ok" } });
+            });
+          } else {
+            sendResponse({ data: { status: "no_tab", error: "No outfit builder tab found" } });
           }
           break;
         }

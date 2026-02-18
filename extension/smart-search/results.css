@@ -378,6 +378,8 @@ body {
 
 .nova-modal-body img {
   width: 100%;
+  max-height: calc(90vh - 180px);
+  object-fit: contain;
   border-radius: 8px;
 }
 

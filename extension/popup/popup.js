@@ -16,7 +16,6 @@ function esc(str) {
 // State
 let pendingSignupEmail = '';
 let cachedProfile = null;
-let autoTryOnFromVoice = false; // flag to auto-trigger try-on when wardrobe opens from voice
 
 // Multi-photo upload state for wizard step 2
 let userPhotos = { body: [null, null, null], face: [null, null] };
@@ -1439,10 +1438,6 @@ async function init() {
     if (cachedProfile?.clothesSize) outfitParams.set('clothesSize', cachedProfile.clothesSize);
     if (cachedProfile?.shoesSize) outfitParams.set('shoesSize', cachedProfile.shoesSize);
     if (cachedProfile?.sex) outfitParams.set('sex', cachedProfile.sex);
-    if (autoTryOnFromVoice) {
-      outfitParams.set('autoTryOn', 'true');
-      autoTryOnFromVoice = false;
-    }
     const url = chrome.runtime.getURL('outfit-builder/wardrobe.html') + '?' + outfitParams.toString();
     chrome.tabs.create({ url });
   });
@@ -1752,6 +1747,7 @@ document.addEventListener('DOMContentLoaded', init);
     // Barge-in / interrupted
     if (msg.serverContent?.interrupted) {
       stopPlayback();
+      pendingToolCall = false; // Ungate audio so user can speak after interruption
     }
 
     // Input transcription (what the user said)
@@ -1868,7 +1864,7 @@ document.addEventListener('DOMContentLoaded', init);
       // Request microphone — may fail in side panel if permission not yet granted
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: true },
+          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
       } catch (micErr) {
         console.warn('[Giselle] Mic permission failed in side panel:', micErr.name);
@@ -1932,6 +1928,7 @@ document.addEventListener('DOMContentLoaded', init);
 
       // Create playback context at 24kHz for Gemini audio output
       playbackContext = new AudioContext({ sampleRate: 24000 });
+      await playbackContext.resume(); // Ensure context is running (Chrome may suspend until user gesture)
       audioQueue = [];
       nextPlayTime = 0;
 
@@ -2029,6 +2026,7 @@ document.addEventListener('DOMContentLoaded', init);
     if (playbackContext) {
       playbackContext.close().catch(() => {});
       playbackContext = new AudioContext({ sampleRate: 24000 });
+      playbackContext.resume().catch(() => {});
     }
   }
 
@@ -2184,8 +2182,6 @@ document.addEventListener('DOMContentLoaded', init);
                 }
               }
             }
-            // Auto-click build button after filling fields — flag auto try-on
-            autoTryOnFromVoice = true;
             document.getElementById('outfitBuildBtn')?.click();
           }, 300);
           sendToolResp(call.id, call.name, 'Outfit builder started with items');
@@ -2222,7 +2218,14 @@ document.addEventListener('DOMContentLoaded', init);
               type: 'VOICE_SELECT_SEARCH_ITEM',
               number: itemNum,
             }, (resp) => {
-              sendToolResp(call.id, call.name, `Try-on started for item ${itemNum}.`);
+              const result = resp?.data || resp;
+              if (result?.status === 'not_found') {
+                sendToolResp(call.id, call.name, `Item ${itemNum} is not available — search results have not finished loading yet. Tell the user to wait for results to load.`);
+              } else if (result?.status === 'no_tab') {
+                sendToolResp(call.id, call.name, 'The search results page is not open yet. Wait for the search to complete.');
+              } else {
+                sendToolResp(call.id, call.name, `Try-on started for item ${itemNum}. The user will see the result shortly.`);
+              }
             });
             continue; // async
           }
@@ -2287,6 +2290,12 @@ document.addEventListener('DOMContentLoaded', init);
         case 'recommend_items': {
           const isOutfitMode = !!cachedOutfitItems && Object.values(cachedOutfitItems).some(arr => arr.length > 0);
           console.log('[recommend_items] 🎯 Tool called! mode:', isOutfitMode ? 'OUTFIT' : 'SEARCH', 'cachedScreenshot:', !!cachedSearchScreenshot, 'cachedProducts:', cachedSearchProducts?.length || 0, 'cachedOutfitItems:', isOutfitMode ? Object.entries(cachedOutfitItems).filter(([,v]) => v.length > 0).map(([k,v]) => `${k}:${v.length}`).join(',') : 'none');
+
+          // Guard: if no data is available, tell the agent to wait
+          if (!isOutfitMode && !cachedSearchScreenshot && (!cachedSearchProducts || cachedSearchProducts.length === 0)) {
+            sendToolResp(call.id, call.name, 'No items are loaded yet. The outfit builder or search results must finish loading before you can recommend items. Tell the user to wait for the items to load, then ask again.');
+            continue;
+          }
 
           if (isOutfitMode) {
             // OUTFIT BUILDER MODE: recommend best combination of items across 6 categories
@@ -2463,7 +2472,26 @@ document.addEventListener('DOMContentLoaded', init);
             type: 'VOICE_SELECT_SEARCH_ITEM',
             number: itemNum,
           }, (resp) => {
-            sendToolResp(call.id, call.name, `Selected item #${itemNum} for try-on.`);
+            const result = resp?.data || resp;
+            if (result?.status === 'not_found') {
+              sendToolResp(call.id, call.name, `Item #${itemNum} is not available — search results have not finished loading yet. Tell the user to wait a moment for results to load before selecting an item.`);
+            } else if (result?.status === 'no_tab') {
+              sendToolResp(call.id, call.name, 'The search results page is not open yet. Wait for the search to complete before selecting items.');
+            } else {
+              sendToolResp(call.id, call.name, `Selected item #${itemNum} and started try-on.`);
+            }
+          });
+          continue; // async
+        }
+        case 'try_on_outfit': {
+          addMessage('bot', 'Starting outfit try-on with all selected items...');
+          chrome.runtime.sendMessage({ type: 'VOICE_TRY_ON_OUTFIT' }, (resp) => {
+            const result = resp?.data || resp;
+            if (result?.status === 'ok') {
+              sendToolResp(call.id, call.name, 'Outfit try-on started! The user will see themselves wearing all the selected items. This takes about 15-30 seconds to generate.');
+            } else {
+              sendToolResp(call.id, call.name, result?.error || 'Could not start try-on — make sure at least a top and bottom are selected in the outfit builder.');
+            }
           });
           continue; // async
         }
@@ -2480,7 +2508,14 @@ document.addEventListener('DOMContentLoaded', init);
             category: cat,
             number: num,
           }, (resp) => {
-            sendToolResp(call.id, call.name, `Selected ${cat} #${num} in the outfit builder. The item is now highlighted.`);
+            const result = resp?.data || resp;
+            if (result?.status === 'not_found') {
+              sendToolResp(call.id, call.name, `Item ${cat} #${num} is not available yet — the outfit builder is still loading items. Tell the user to wait until items finish loading, then try again.`);
+            } else if (result?.status === 'no_tab') {
+              sendToolResp(call.id, call.name, 'The outfit builder is not open yet. Wait for it to open and load items first.');
+            } else {
+              sendToolResp(call.id, call.name, `Selected ${cat} #${num} in the outfit builder. The item is now highlighted.`);
+            }
           });
           continue; // async
         }
