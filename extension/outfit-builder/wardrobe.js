@@ -943,24 +943,14 @@ async function handleAnimate() {
     }
 
     const response = await sendMessage({ type: "GENERATE_VIDEO", imageBase64 });
-    const jobId = response.jobId;
-    const provider = response.provider || "grok";
 
-    // Poll for completion
-    const MAX_POLLS = 60;
+    // Veo 3.1 returns video directly (no polling needed)
     let videoResult;
-    for (let i = 0; i < MAX_POLLS; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      const status = await sendMessage({ type: "GET_VIDEO_STATUS", jobId, provider });
-      if ((status.status === "Completed" || status.status === "COMPLETED") && (status.videoUrl || status.videoBase64)) {
-        videoResult = status;
-        break;
-      }
-      if (status.status === "Failed" || status.status === "FAILED") {
-        throw new Error(status.failureMessage || "Video generation failed");
-      }
+    if (response.videoBase64 || response.videoUrl) {
+      videoResult = response;
+    } else {
+      throw new Error("Video generation failed — no video returned");
     }
-    if (!videoResult) throw new Error("Video generation timed out");
 
     clearInterval(videoTimerInterval);
     const elapsed = ((Date.now() - videoStart) / 1000).toFixed(1);
@@ -1126,6 +1116,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     } else {
       console.warn(`[Wardrobe] Voice select: ${cat} #${num} not found (${items.length} items)`);
       sendResponse({ status: "not_found" });
+    }
+    return true;
+  }
+
+  // Voice agent: animate try-on result
+  if (message.type === "ANIMATE_TRYON") {
+    const animateBtn = document.getElementById("animateBtn");
+    if (animateBtn && !animateBtn.disabled && !animateBtn.hidden) {
+      animateBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: lastTryOnResultBase64 ? "Animate button not available" : "No try-on result to animate. Try on an outfit first." });
+    }
+    return true;
+  }
+
+  // Voice agent: save to favorites
+  if (message.type === "SAVE_TO_FAVORITES") {
+    const favBtn = document.getElementById("favoriteBtn");
+    if (favBtn && !favBtn.disabled && !favBtn.hidden && !favBtn.classList.contains("vw-btn-favorite--saved")) {
+      favBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: lastTryOnResultBase64 ? "Already saved or button not available" : "No try-on result to save. Try on an outfit first." });
+    }
+    return true;
+  }
+
+  // Voice agent: save video
+  if (message.type === "SAVE_VIDEO") {
+    const animateBtn = document.getElementById("animateBtn");
+    if (animateBtn && !animateBtn.disabled && lastVideoSrc) {
+      animateBtn.click();
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, error: "No video to save. Generate a video first." });
     }
     return true;
   }

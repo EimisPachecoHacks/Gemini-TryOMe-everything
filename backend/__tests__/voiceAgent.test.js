@@ -77,23 +77,21 @@ describe("Voice Agent — System Prompt", () => {
     "utf-8"
   );
 
-  test("contains outfit builder flow instructions", () => {
-    expect(source).toContain("OUTFIT BUILDER FLOW");
-    expect(source).toContain("6 categories: top, bottom, shoes, necklace, earrings, bracelet");
+  test("contains outfit builder instructions with 6 categories", () => {
+    expect(source).toContain("OUTFIT BUILDER");
+    expect(source).toContain("top, bottom, shoes, necklace, earrings, bracelet");
   });
 
-  test("contains saving & videos instructions", () => {
-    expect(source).toContain("SAVING & VIDEOS");
+  test("contains tool protocol requiring user confirmation", () => {
+    expect(source).toContain("TOOL PROTOCOL");
+    expect(source).toContain("confirms");
+  });
+
+  test("mentions key tool names in prompt or descriptions", () => {
     expect(source).toContain("save_to_favorites");
     expect(source).toContain("save_video");
     expect(source).toContain("show_videos");
     expect(source).toContain("show_favorites");
-  });
-
-  test("mentions all 6 outfit categories as having 3 main + 3 optional", () => {
-    expect(source).toContain("top, bottom, shoes");
-    expect(source).toContain("necklace, earrings, bracelet");
-    expect(source).toContain("optional accessories");
   });
 });
 

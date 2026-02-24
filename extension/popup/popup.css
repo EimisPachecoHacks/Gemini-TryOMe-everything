@@ -1158,6 +1158,7 @@ a.video-outfit-link:hover { background: rgba(255, 153, 0, 0.25); text-decoration
   padding: 0 4px;
 }
 .giselle-close:hover { color: #fff; }
+.giselle-confirm-no:hover { background: #777; }
 .giselle-messages {
   flex: 1;
   overflow-y: auto;

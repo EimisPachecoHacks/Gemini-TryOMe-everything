@@ -7,6 +7,7 @@ const { optionalAuth } = require("../middleware/auth");
 const PYTHON_SCRIPT = path.join(__dirname, "..", "python-services", "smart_search.py");
 const PYTHON_VENV = path.join(__dirname, "..", "python-services", "venv", "bin", "python3");
 const SEARCH_TIMEOUT = 180000; // 3 minutes max for Nova Act
+const SMART_SEARCH_URL = process.env.SMART_SEARCH_URL || ""; // e.g. https://xxxx.ngrok.io/search
 
 // Concurrency limiter — max 2 Playwright browsers at once to avoid OOM on Cloud Run
 const MAX_CONCURRENT = 2;
@@ -41,14 +42,18 @@ router.post("/", optionalAuth, async (req, res, next) => {
     console.log(`\n[smartSearch] ========== SMART SEARCH REQUEST ==========`);
     console.log(`[smartSearch] query: "${query}"`);
     console.log(`[smartSearch] authenticated: ${!!req.userId}`);
-    console.log(`[smartSearch] Spawning Python Nova Act process... (active: ${activeSearches}/${MAX_CONCURRENT}, queued: ${waitQueue.length})`);
-
-    await acquireSlot();
     let result;
-    try {
-      result = await runPythonSearch(query.trim());
-    } finally {
-      releaseSlot();
+    if (SMART_SEARCH_URL) {
+      console.log(`[smartSearch] Forwarding to local search server: ${SMART_SEARCH_URL}`);
+      result = await runRemoteSearch(query.trim());
+    } else {
+      console.log(`[smartSearch] Spawning Python Nova Act process... (active: ${activeSearches}/${MAX_CONCURRENT}, queued: ${waitQueue.length})`);
+      await acquireSlot();
+      try {
+        result = await runPythonSearch(query.trim());
+      } finally {
+        releaseSlot();
+      }
     }
 
     console.log(`[smartSearch] Results: ${result.products ? result.products.length : 0} products`);
@@ -144,6 +149,28 @@ function runPythonSearch(query) {
       }
     }, SEARCH_TIMEOUT);
   });
+}
+
+/**
+ * Forward search request to a remote local search server (residential IP).
+ */
+async function runRemoteSearch(query) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT);
+  try {
+    const response = await fetch(SMART_SEARCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Remote search failed: ${response.status} ${response.statusText}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 module.exports = router;

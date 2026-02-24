@@ -7,7 +7,7 @@
  * Frontend sends Gemini-native format messages; backend translates to SDK calls.
  */
 
-const { GoogleGenAI, Modality } = require("@google/genai");
+const { GoogleGenAI, Modality, StartSensitivity, EndSensitivity } = require("@google/genai");
 const { buildSystemInstruction, GISELLE_TOOLS } = require("../services/giselleLive");
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID || "project-4213188d-5b34-47c7-84e";
@@ -27,9 +27,15 @@ function getClient() {
   return aiClient;
 }
 
-function sendToClient(ws, msg) {
+function sendJSON(ws, msg) {
   if (ws.readyState === 1) {
     ws.send(JSON.stringify(msg));
+  }
+}
+
+function sendBinary(ws, data) {
+  if (ws.readyState === 1) {
+    ws.send(data, { binary: true });
   }
 }
 
@@ -44,19 +50,36 @@ module.exports = async function handleConnection(ws, req) {
   let sessionReady = false;
   let pendingToolCall = false;
 
-  ws.on("message", async (data) => {
+  ws.on("message", async (data, isBinary) => {
+    // --- Binary message = raw PCM audio from mic ---
+    if (isBinary) {
+      if (!session || !sessionReady || pendingToolCall) return;
+      try {
+        session.sendRealtimeInput({
+          audio: {
+            data: Buffer.from(data).toString("base64"),
+            mimeType: "audio/pcm;rate=16000",
+          },
+        });
+      } catch (e) {
+        console.warn("[voice-live] Error sending audio:", e.message);
+      }
+      return;
+    }
+
+    // --- Text message = JSON (setup, tool responses, client content) ---
     let msg;
     try {
       msg = JSON.parse(data.toString());
     } catch {
-      sendToClient(ws, { type: "error", message: "Invalid JSON" });
+      sendJSON(ws, { type: "error", message: "Invalid JSON" });
       return;
     }
 
     // --- Setup message: connect to Gemini Live via Vertex AI SDK ---
     if (msg.setup) {
       if (session) {
-        sendToClient(ws, { type: "error", message: "Session already started" });
+        sendJSON(ws, { type: "error", message: "Session already started" });
         return;
       }
 
@@ -80,24 +103,31 @@ module.exports = async function handleConnection(ws, req) {
             inputAudioTranscription: {},
             outputAudioTranscription: {},
             tools: GISELLE_TOOLS,
+            realtimeInputConfig: {
+              automaticActivityDetection: {
+                startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
+                endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+                prefixPaddingMs: 40,
+                silenceDurationMs: 500,
+              },
+            },
           },
           callbacks: {
             onopen: () => {
               console.log("[voice-live] Connected to Gemini Live (Vertex AI)");
               sessionReady = true;
-              sendToClient(ws, { setupComplete: true });
+              sendJSON(ws, { setupComplete: true });
             },
             onmessage: (geminiMsg) => {
-              handleGeminiMessage(ws, geminiMsg);
+              handleGeminiMessage(ws, geminiMsg, (val) => { pendingToolCall = val; });
             },
             onerror: (e) => {
               console.error("[voice-live] Gemini error:", e.message || e);
-              sendToClient(ws, { type: "error", message: "Voice session error" });
+              sendJSON(ws, { type: "error", message: "Voice session error" });
             },
             onclose: (e) => {
               console.log("[voice-live] Gemini closed — code:", e?.code, "reason:", e?.reason || "(none)");
               sessionReady = false;
-              // Notify client so it can reconnect
               if (ws.readyState === 1) {
                 ws.close(1000, "Gemini session ended");
               }
@@ -106,30 +136,12 @@ module.exports = async function handleConnection(ws, req) {
         });
       } catch (err) {
         console.error("[voice-live] Failed to connect to Gemini:", err.message);
-        sendToClient(ws, { type: "error", message: "Failed to connect: " + err.message });
+        sendJSON(ws, { type: "error", message: "Failed to connect: " + err.message });
       }
       return;
     }
 
     if (!session || !sessionReady) return;
-
-    // --- Audio input ---
-    if (msg.realtimeInput?.mediaChunks) {
-      if (pendingToolCall) return; // Gate audio during tool calls
-      for (const chunk of msg.realtimeInput.mediaChunks) {
-        try {
-          session.sendRealtimeInput({
-            audio: {
-              data: chunk.data,
-              mimeType: chunk.mimeType || "audio/pcm;rate=16000",
-            },
-          });
-        } catch (e) {
-          console.warn("[voice-live] Error sending audio:", e.message);
-        }
-      }
-      return;
-    }
 
     // --- Tool response ---
     if (msg.toolResponse?.functionResponses) {
@@ -138,7 +150,7 @@ module.exports = async function handleConnection(ws, req) {
           functionResponses: msg.toolResponse.functionResponses,
         });
         pendingToolCall = false;
-        console.log("[voice-live] Tool response sent, audio ungated");
+        console.log("[voice-live] Tool response sent — audio ungated");
       } catch (e) {
         console.warn("[voice-live] Error sending tool response:", e.message);
       }
@@ -188,74 +200,62 @@ module.exports = async function handleConnection(ws, req) {
 /**
  * Forward Gemini Live messages to the client in the same native format.
  */
-function handleGeminiMessage(ws, msg) {
-  // Audio data
+function handleGeminiMessage(ws, msg, setPendingToolCall) {
+  // Audio data — send as raw binary for performance
   if (msg.serverContent?.modelTurn?.parts) {
     for (const part of msg.serverContent.modelTurn.parts) {
-      if (part.inlineData) {
-        sendToClient(ws, {
-          serverContent: {
-            modelTurn: {
-              parts: [{ inlineData: { data: part.inlineData.data, mimeType: part.inlineData.mimeType } }],
-            },
-          },
-        });
+      if (part.inlineData?.data) {
+        // Send raw PCM bytes (decode base64 from SDK → binary to client)
+        sendBinary(ws, Buffer.from(part.inlineData.data, "base64"));
       }
       if (part.text) {
-        // Native audio model: text parts are internal reasoning — forward as-is
-        // (frontend handles suppression)
-        sendToClient(ws, {
-          serverContent: {
-            modelTurn: {
-              parts: [{ text: part.text }],
-            },
-          },
-        });
+        // Native audio model: text parts are internal reasoning — suppress
+        // (don't forward to save bandwidth)
       }
     }
   }
 
   // Turn complete
   if (msg.serverContent?.turnComplete) {
-    sendToClient(ws, { serverContent: { turnComplete: true } });
+    sendJSON(ws, { serverContent: { turnComplete: true } });
   }
 
   // Interrupted
   if (msg.serverContent?.interrupted) {
-    sendToClient(ws, { serverContent: { interrupted: true } });
+    sendJSON(ws, { serverContent: { interrupted: true } });
   }
 
   // Input transcription
   if (msg.serverContent?.inputTranscription?.text) {
-    sendToClient(ws, {
+    sendJSON(ws, {
       serverContent: { inputTranscription: { text: msg.serverContent.inputTranscription.text } },
     });
   }
 
   // Output transcription
   if (msg.serverContent?.outputTranscription?.text) {
-    sendToClient(ws, {
+    sendJSON(ws, {
       serverContent: { outputTranscription: { text: msg.serverContent.outputTranscription.text } },
     });
   }
 
-  // Tool calls — gate audio input while tool is being processed
+  // Tool calls — forward to client for execution and gate audio
   if (msg.toolCall?.functionCalls) {
-    pendingToolCall = true;
-    sendToClient(ws, {
+    setPendingToolCall(true);
+    sendJSON(ws, {
       toolCall: { functionCalls: msg.toolCall.functionCalls },
     });
   }
 
   // Tool call cancellation
   if (msg.toolCallCancellation?.ids) {
-    sendToClient(ws, {
+    sendJSON(ws, {
       toolCallCancellation: { ids: msg.toolCallCancellation.ids },
     });
   }
 
   // Go away
   if (msg.goAway) {
-    sendToClient(ws, { goAway: msg.goAway });
+    sendJSON(ws, { goAway: msg.goAway });
   }
 }

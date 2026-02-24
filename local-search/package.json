@@ -1,0 +1,14 @@
+{
+  "name": "smart-search-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local smart search server using Playwright (runs on residential IP)",
+  "main": "smart-search-server.js",
+  "scripts": {
+    "start": "node smart-search-server.js",
+    "install-browser": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

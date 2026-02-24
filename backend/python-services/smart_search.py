@@ -17,6 +17,7 @@ import json
 import sys
 import os
 import time
+import random
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -46,6 +47,7 @@ class ProductList(BaseModel):
 AMAZON_URL = "https://www.amazon.com"
 TARGET_PRODUCT_COUNT = 20
 MAX_SCROLL_ROUNDS = 5
+PROXY_URL = os.environ.get("PROXY_URL", "")  # e.g. http://user:pass@proxy.example.com:8080
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +63,8 @@ def smart_search(query: str, headless: bool = True) -> list[dict]:
 
     log(f"Starting smart search for: {query}")
     log(f"Headless mode: {headless}")
+    if PROXY_URL:
+        log(f"Using proxy: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -72,12 +76,35 @@ def smart_search(query: str, headless: bool = True) -> list[dict]:
                 "--disable-web-security",
             ],
         )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        # Build context options
+        context_kwargs = dict(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
             locale="en-US",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            },
         )
+
+        # Add proxy if configured
+        if PROXY_URL:
+            from urllib.parse import urlparse
+            parsed = urlparse(PROXY_URL)
+            proxy_conf = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+            if parsed.username:
+                proxy_conf["username"] = parsed.username
+            if parsed.password:
+                proxy_conf["password"] = parsed.password
+            context_kwargs["proxy"] = proxy_conf
+
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
         page.set_default_timeout(45000)
 
@@ -92,6 +119,8 @@ def smart_search(query: str, headless: bool = True) -> list[dict]:
         # Step 1: Navigate directly to search results (avoids homepage bot detection)
         search_url = f"{AMAZON_URL}/s?k={quote_plus(query)}"
         log(f"Step 1: Navigating to {search_url}")
+        # Small random delay to appear more human
+        time.sleep(random.uniform(0.5, 1.5))
         page.goto(search_url, wait_until="domcontentloaded")
 
         # Wait for product results to appear (more reliable than networkidle)
@@ -99,13 +128,31 @@ def smart_search(query: str, headless: bool = True) -> list[dict]:
             page.wait_for_selector('[data-component-type="s-search-result"], [data-asin]', timeout=15000)
             log("Step 1: Search results loaded")
         except Exception:
-            log("Warning: Search result selectors not found, page might show CAPTCHA")
-            # Take screenshot for debugging
+            log("Warning: Search result selectors not found, checking page content...")
+            # Capture page info for debugging
             try:
+                page_title = page.title()
+                page_url = page.url
+                log(f"  Page title: {page_title}")
+                log(f"  Page URL: {page_url}")
+                # Check for CAPTCHA indicators
+                body_text = page.evaluate("document.body?.innerText?.substring(0, 500) || ''")
+                log(f"  Page body (first 500 chars): {body_text}")
+                if "captcha" in body_text.lower() or "robot" in body_text.lower() or "automated" in body_text.lower():
+                    log("  *** CAPTCHA/BOT DETECTION detected! Amazon is blocking this request. ***")
                 page.screenshot(path="/tmp/amazon_debug.png")
-                log("Debug screenshot saved to /tmp/amazon_debug.png")
+                log("  Debug screenshot saved to /tmp/amazon_debug.png")
+            except Exception as debug_err:
+                log(f"  Debug capture failed: {debug_err}")
+
+            # Retry: try reloading the page once (sometimes clears transient blocks)
+            log("  Retrying with page reload...")
+            try:
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_selector('[data-component-type="s-search-result"], [data-asin]', timeout=15000)
+                log("  Retry successful! Search results loaded after reload.")
             except Exception:
-                pass
+                log("  Retry failed. Amazon may be blocking from this IP.")
 
         # Step 2: Apply 4-star+ customer reviews filter
         log("Step 2: Applying 4★+ customer review filter...")
@@ -240,6 +287,21 @@ def smart_search(query: str, headless: bool = True) -> list[dict]:
                         f"({len(all_products)} unique total)")
                 else:
                     log("  No products extracted in this round.")
+                    # Log DOM state for debugging
+                    if round_num == 0:
+                        try:
+                            dom_info = page.evaluate("""
+                                () => {
+                                    const searchResults = document.querySelectorAll('[data-component-type="s-search-result"]').length;
+                                    const asinItems = document.querySelectorAll('[data-asin]:not([data-asin=""])').length;
+                                    const h2Count = document.querySelectorAll('h2').length;
+                                    const imgCount = document.querySelectorAll('img.s-image').length;
+                                    return `search-results: ${searchResults}, asin-items: ${asinItems}, h2s: ${h2Count}, s-images: ${imgCount}`;
+                                }
+                            """)
+                            log(f"  DOM state: {dom_info}")
+                        except Exception:
+                            pass
 
             except Exception as e:
                 log(f"  Error extracting products: {e}")

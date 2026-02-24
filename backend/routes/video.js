@@ -1,6 +1,5 @@
 const express = require("express");
 const router = express.Router();
-const { generateVideo: grokGenerateVideo, getVideoStatus: grokGetVideoStatus } = require("../services/grok");
 const { generateVideo: veoGenerateVideo } = require("../services/veo");
 const { requireAuth, optionalAuth } = require("../middleware/auth");
 const { validateBase64Image } = require("../middleware/validation");
@@ -8,7 +7,7 @@ const { getProfile, getUserVideos, saveVideoRecord, removeVideo } = require("../
 const storage = require("../services/storage");
 
 // Allowed video CDN domains for SSRF prevention
-const ALLOWED_VIDEO_HOSTS = ["fal.media", "v3.fal.media", "storage.googleapis.com"];
+const ALLOWED_VIDEO_HOSTS = ["storage.googleapis.com"];
 const VALID_VIDEO_ID = /^[A-Za-z0-9_\-]{1,100}$/;
 
 router.post("/", optionalAuth, async (req, res, next) => {
@@ -23,40 +22,7 @@ router.post("/", optionalAuth, async (req, res, next) => {
       return res.status(400).json({ error: `Invalid image: ${imgCheck.error}` });
     }
 
-    console.log("[video] Starting video generation job - provider: grok");
-
-    // Get user's sex for correct pronouns in default prompt
-    let sex = null;
-    if (req.userId) {
-      try {
-        const profile = await getProfile(req.userId);
-        sex = profile?.sex || null;
-      } catch (err) { console.warn("[video] Profile fetch failed:", err.message); }
-    }
-
-    const result = await grokGenerateVideo(image, prompt, sex);
-    res.json({ jobId: result.requestId, provider: "grok" });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// POST /api/video/veo — Generate video using Google Veo 3.1 (synchronous — waits for completion)
-// Unlike Grok which returns a jobId for polling, Veo polls internally and returns the video directly.
-// The response includes videoBase64 which can be used with POST /api/video/save.
-router.post("/veo", optionalAuth, async (req, res, next) => {
-  try {
-    const { image, prompt } = req.body;
-    if (!image) {
-      return res.status(400).json({ error: "image is required" });
-    }
-
-    const imgCheck = validateBase64Image(image);
-    if (!imgCheck.valid) {
-      return res.status(400).json({ error: `Invalid image: ${imgCheck.error}` });
-    }
-
-    console.log("[video] Starting Veo 3.1 video generation (synchronous)");
+    console.log("[video] Starting Veo 3.1 video generation");
 
     // Get user's sex for correct pronouns in default prompt
     let sex = null;
@@ -68,7 +34,6 @@ router.post("/veo", optionalAuth, async (req, res, next) => {
     }
 
     const result = await veoGenerateVideo(image, prompt, sex);
-
     console.log("[video] Veo 3.1 video generation complete");
     res.json({
       status: "Completed",
@@ -76,7 +41,6 @@ router.post("/veo", optionalAuth, async (req, res, next) => {
       provider: "veo",
     });
   } catch (error) {
-    console.error("[video] Veo generation failed:", error.message);
     next(error);
   }
 });
@@ -121,18 +85,6 @@ router.get("/stream/:videoKey(*)", async (req, res, next) => {
   } catch (error) {
     console.error(`[video] Stream failed for key ${req.params.videoKey}:`, error.message);
     res.status(404).json({ error: "Video not found" });
-  }
-});
-
-router.get("/:jobId", async (req, res, next) => {
-  try {
-    const jobId = decodeURIComponent(req.params.jobId);
-    console.log(`[video] Checking status for job: ${jobId}, provider: grok`);
-
-    const status = await grokGetVideoStatus(jobId);
-    res.json(status);
-  } catch (error) {
-    next(error);
   }
 });
 

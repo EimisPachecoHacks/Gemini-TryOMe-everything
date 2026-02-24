@@ -1161,11 +1161,14 @@
 
     try {
       const response = await ApiClient.generateVideo(resultImage);
-      const jobId = response.jobId;
-      const videoProvider = response.provider || "grok";
 
-      // Poll for video completion
-      const videoResult = await pollVideoStatus(jobId, videoProvider);
+      // Veo 3.1 returns video directly (no polling needed)
+      let videoResult;
+      if (response.videoBase64 || response.videoUrl) {
+        videoResult = response;
+      } else {
+        throw new Error("Video generation failed — no video returned");
+      }
 
       clearInterval(videoTimerInterval);
       const videoElapsed = ((Date.now() - videoStart) / 1000).toFixed(1);

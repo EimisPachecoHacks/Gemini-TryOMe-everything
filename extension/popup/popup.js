@@ -1586,6 +1586,7 @@ document.addEventListener('DOMContentLoaded', init);
   let recentTranscripts = []; // last few transcripts for extracting accessory mentions
 
   let pendingToolCall = false; // Audio gate — block audio during pending tool calls
+  let lastTryOnSource = null; // "outfit" or "search" — tracks which mode did the last try-on
 
   // Get WebSocket URL for the Vertex AI voice proxy on our backend
   function getWsUrl() {
@@ -1668,7 +1669,14 @@ document.addEventListener('DOMContentLoaded', init);
         ws.send(JSON.stringify({ setup: { userContext } }));
       };
 
+      ws.binaryType = 'arraybuffer';
       ws.onmessage = async (event) => {
+        // Binary message = raw PCM audio from Gemini
+        if (event.data instanceof ArrayBuffer) {
+          playAudioChunkBinary(event.data);
+          return;
+        }
+        // Text message = JSON events (transcriptions, tool calls, etc.)
         let text;
         if (event.data instanceof Blob) {
           text = await event.data.text();
@@ -1725,18 +1733,8 @@ document.addEventListener('DOMContentLoaded', init);
       return;
     }
 
-    // Audio data from model
-    if (msg.serverContent?.modelTurn?.parts) {
-      for (const part of msg.serverContent.modelTurn.parts) {
-        if (part.inlineData) {
-          playAudioChunk(part.inlineData.data, part.inlineData.mimeType);
-        }
-        // Suppress text parts — native audio model text is internal reasoning
-        if (part.text) {
-          console.log(`[Giselle] Suppressed thinking: "${part.text.trim().substring(0, 80)}..."`);
-        }
-      }
-    }
+    // Audio now arrives as binary ArrayBuffer (handled in ws.onmessage above)
+    // Text/thinking parts from model are suppressed by the backend
 
     // Turn complete
     if (msg.serverContent?.turnComplete) {
@@ -1853,6 +1851,17 @@ document.addEventListener('DOMContentLoaded', init);
   async function startStreaming() {
     try {
       addMessage('bot', 'Listening...');
+
+      // Create playback context FIRST so greeting audio isn't dropped
+      // (Gemini starts speaking as soon as session opens — if playbackContext
+      // doesn't exist yet, playAudioChunk silently discards those chunks)
+      if (!playbackContext) {
+        playbackContext = new AudioContext({ sampleRate: 24000 });
+        await playbackContext.resume();
+      }
+      audioQueue = [];
+      nextPlayTime = 0;
+
       await ensureWsConnected();
 
       // Check if getUserMedia is available (may not be in side panel context)
@@ -1890,10 +1899,13 @@ document.addEventListener('DOMContentLoaded', init);
       workletNode = new AudioWorkletNode(captureContext, 'pcm-capture-processor');
 
       // Send PCM chunks to backend
+      // Delay audio sending by 3s to let AEC (echo cancellation) calibrate —
+      // prevents Gemini from hearing its own greeting and barging in on itself
+      const audioSendStartTime = Date.now() + 3000;
       let audioChunkCount = 0;
       let maxAudioLevel = 0;
       workletNode.port.onmessage = (e) => {
-        if (ws && ws.readyState === WebSocket.OPEN && !pendingToolCall) {
+        if (ws && ws.readyState === WebSocket.OPEN && !pendingToolCall && Date.now() >= audioSendStartTime) {
           const int16Array = new Int16Array(e.data);
           // Track audio levels for debugging
           for (let i = 0; i < int16Array.length; i++) {
@@ -1905,16 +1917,8 @@ document.addEventListener('DOMContentLoaded', init);
             console.log(`[Giselle] 🎙️ Audio: ${audioChunkCount} chunks sent, peak level: ${maxAudioLevel} / 32768 (${(maxAudioLevel / 32768 * 100).toFixed(1)}%), sampleRate: ${captureContext.sampleRate}`);
             maxAudioLevel = 0;
           }
-          const base64 = int16ToBase64(int16Array);
-          // Send in Gemini's native realtimeInput format
-          ws.send(JSON.stringify({
-            realtimeInput: {
-              mediaChunks: [{
-                mimeType: 'audio/pcm;rate=16000',
-                data: base64,
-              }],
-            },
-          }));
+          // Send raw PCM binary (no base64 encoding, no JSON wrapper)
+          ws.send(int16Array.buffer);
         }
       };
 
@@ -1925,12 +1929,6 @@ document.addEventListener('DOMContentLoaded', init);
       silentDest.gain.value = 0;
       silentDest.connect(captureContext.destination);
       workletNode.connect(silentDest);
-
-      // Create playback context at 24kHz for Gemini audio output
-      playbackContext = new AudioContext({ sampleRate: 24000 });
-      await playbackContext.resume(); // Ensure context is running (Chrome may suspend until user gesture)
-      audioQueue = [];
-      nextPlayTime = 0;
 
       isStreaming = true;
       micBtn.classList.add('recording');
@@ -1987,6 +1985,26 @@ document.addEventListener('DOMContentLoaded', init);
 
   // --- Audio playback ---
 
+  // Play raw PCM binary (ArrayBuffer) — used for binary WebSocket messages
+  function playAudioChunkBinary(arrayBuffer) {
+    if (!playbackContext) return;
+    const int16 = new Int16Array(arrayBuffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+    const audioBuffer = playbackContext.createBuffer(1, float32.length, 24000);
+    audioBuffer.getChannelData(0).set(float32);
+    const source = playbackContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(playbackContext.destination);
+    const now = playbackContext.currentTime;
+    const startTime = Math.max(now, nextPlayTime);
+    source.start(startTime);
+    nextPlayTime = startTime + audioBuffer.duration;
+  }
+
+  // Legacy: play base64-encoded audio (kept for compatibility)
   function playAudioChunk(base64Data, mimeType) {
     if (!playbackContext) return;
 
@@ -2212,6 +2230,7 @@ document.addEventListener('DOMContentLoaded', init);
           }
 
           if (itemNum) {
+            lastTryOnSource = 'search';
             // Delegate to the same message-passing path as select_search_item
             addMessage('bot', `Trying on item ${itemNum} from the search results!`);
             chrome.runtime.sendMessage({
@@ -2249,7 +2268,7 @@ document.addEventListener('DOMContentLoaded', init);
         }
         case 'save_to_favorites': {
           // Send message to content script to save the current try-on result
-          sendMsg({ type: 'SAVE_TO_FAVORITES' }).then((result) => {
+          sendMsg({ type: 'SAVE_TO_FAVORITES', source: lastTryOnSource || 'search' }).then((result) => {
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to save. Try on an item first.');
             } else {
@@ -2262,7 +2281,7 @@ document.addEventListener('DOMContentLoaded', init);
         }
         case 'animate': {
           // Trigger animate button on the current try-on result
-          sendMsg({ type: 'ANIMATE_TRYON' }).then((result) => {
+          sendMsg({ type: 'ANIMATE_TRYON', source: lastTryOnSource || 'search' }).then((result) => {
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to animate. Try on an item first.');
             } else {
@@ -2275,7 +2294,7 @@ document.addEventListener('DOMContentLoaded', init);
         }
         case 'save_video': {
           // Send message to content script to save the current video
-          sendMsg({ type: 'SAVE_VIDEO' }).then((result) => {
+          sendMsg({ type: 'SAVE_VIDEO', source: lastTryOnSource || 'search' }).then((result) => {
             sendToolResp(call.id, call.name, result?.success ? 'Video saved' : 'Video saved');
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No video to save. Generate a video first.');
@@ -2361,7 +2380,7 @@ document.addEventListener('DOMContentLoaded', init);
                     .join('\n');
                   console.log('[recommend_items] Sending outfit combination back to Gemini + auto-selecting', picks.length, 'items');
                   sendToolResp(call.id, call.name,
-                    `Here is my recommended outfit combination based on your body type and skin tone:\n${comboText}\n${result.overallReason ? '\nOverall: ' + result.overallReason : ''}\n\nTell the user the recommended item NUMBER for each category and explain WHY this combination works for them. Mention specific item numbers so they can select them.`
+                    `Here is my recommended outfit combination based on your body type and skin tone:\n${comboText}\n${result.overallReason ? '\nOverall: ' + result.overallReason : ''}\n\nTell the user the recommended item NUMBER for each category and explain WHY this combination works for them. Mention specific item numbers so they can select them.\n\nIMPORTANT: Do NOT call try_on_outfit now. Ask the user if they want to try on this combination first. Wait for their explicit yes.`
                   );
                 } else if (result.recommendations && result.recommendations.length > 0) {
                   // Fallback to flat recommendations
@@ -2462,6 +2481,7 @@ document.addEventListener('DOMContentLoaded', init);
           continue; // async
         }
         case 'select_search_item': {
+          lastTryOnSource = 'search';
           const itemNum = parseInt(data.number, 10);
           if (!itemNum || itemNum < 1) {
             sendToolResp(call.id, call.name, 'Invalid item number.');
@@ -2484,6 +2504,7 @@ document.addEventListener('DOMContentLoaded', init);
           continue; // async
         }
         case 'try_on_outfit': {
+          lastTryOnSource = 'outfit';
           addMessage('bot', 'Starting outfit try-on with all selected items...');
           chrome.runtime.sendMessage({ type: 'VOICE_TRY_ON_OUTFIT' }, (resp) => {
             const result = resp?.data || resp;

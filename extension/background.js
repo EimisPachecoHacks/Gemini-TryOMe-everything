@@ -311,10 +311,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         case "SMART_SEARCH": {
-          const result = await apiPost("/api/smart-search", {
-            query: message.query,
-          });
-          sendResponse({ data: result });
+          // Client-side search: open Amazon in a hidden tab, extract products using user's residential IP
+          try {
+            const products = await clientSideAmazonSearch(message.query);
+            if (products && products.length > 0) {
+              console.log(`[background] Client-side search returned ${products.length} products`);
+              sendResponse({ data: { success: true, products } });
+            } else {
+              // Fallback to backend if client-side returns nothing
+              console.log("[background] Client-side search returned 0 products, falling back to backend");
+              const result = await apiPost("/api/smart-search", {
+                query: message.query,
+              });
+              sendResponse({ data: result });
+            }
+          } catch (err) {
+            console.warn("[background] Client-side search failed, falling back to backend:", err.message);
+            const result = await apiPost("/api/smart-search", {
+              query: message.query,
+            });
+            sendResponse({ data: result });
+          }
           break;
         }
 
@@ -387,16 +404,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case "SAVE_TO_FAVORITES":
         case "ANIMATE_TRYON":
         case "SAVE_VIDEO": {
-          // Try smart search results tab first (where try-on results are shown),
-          // then fall back to active tab (for Amazon product page try-ons)
+          // Route to the tab that did the most recent try-on (outfit builder or smart search)
           const voiceAllTabs = await chrome.tabs.query({});
-          const searchResultsTab = voiceAllTabs
-            .filter(t => t.url && t.url.includes("smart-search/results.html"))
-            .sort((a, b) => b.id - a.id)[0];
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          const targetTab = searchResultsTab || activeTab;
+          let targetTab = null;
+
+          if (message.source === "outfit") {
+            // Route to wardrobe tab
+            targetTab = voiceAllTabs
+              .filter(t => t.url && t.url.includes("outfit-builder/wardrobe.html"))
+              .sort((a, b) => b.id - a.id)[0];
+          }
+
+          if (!targetTab) {
+            // Route to smart search tab (default / fallback)
+            targetTab = voiceAllTabs
+              .filter(t => t.url && t.url.includes("smart-search/results.html"))
+              .sort((a, b) => b.id - a.id)[0];
+          }
+
+          if (!targetTab) {
+            // Final fallback: active tab
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            targetTab = activeTab;
+          }
+
           if (targetTab?.id) {
-            console.log(`[background] ${message.type} → tab ${targetTab.id} (${searchResultsTab ? 'search results' : 'active tab'})`);
+            console.log(`[background] ${message.type} → tab ${targetTab.id} (source: ${message.source || 'unset'})`);
             chrome.tabs.sendMessage(targetTab.id, { type: message.type }, (res) => {
               if (chrome.runtime.lastError) {
                 console.warn(`[background] ${message.type} failed:`, chrome.runtime.lastError.message);
@@ -596,5 +629,172 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     });
   }, delay);
 });
+
+// ---------------------------------------------------------------------------
+// Client-side Amazon Smart Search
+// Opens Amazon in a hidden tab, extracts products using user's residential IP.
+// No backend needed, no CAPTCHA issues.
+// ---------------------------------------------------------------------------
+const AMAZON_SEARCH_URL = "https://www.amazon.com/s";
+const AMAZON_4STAR_REFINEMENT = "p_72:2661618011"; // 4-star & up filter
+const TARGET_PRODUCTS = 20;
+
+async function clientSideAmazonSearch(query) {
+  console.log(`[smart-search] Client-side search for: "${query}"`);
+
+  // Build Amazon search URL with 4-star filter baked in
+  const url = `${AMAZON_SEARCH_URL}?k=${encodeURIComponent(query)}&rh=${encodeURIComponent(AMAZON_4STAR_REFINEMENT)}`;
+
+  // Create a hidden background tab
+  const tab = await chrome.tabs.create({ url, active: false });
+
+  try {
+    // Wait for the tab to finish loading
+    await waitForTabLoad(tab.id);
+
+    // Small delay for dynamic content to render
+    await sleep(2000);
+
+    // Extract products by injecting script into the Amazon tab
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: extractAmazonProducts,
+    });
+
+    const products = results?.[0]?.result || [];
+    console.log(`[smart-search] Extracted ${products.length} products from Amazon tab`);
+
+    // Deduplicate and limit
+    const seen = new Set();
+    const unique = [];
+    for (const p of products) {
+      if (p.title && !seen.has(p.title)) {
+        seen.add(p.title);
+        unique.push(p);
+      }
+      if (unique.length >= TARGET_PRODUCTS) break;
+    }
+
+    return unique;
+  } finally {
+    // Always close the hidden tab
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch (e) {
+      // Tab may have been closed already
+    }
+  }
+}
+
+function waitForTabLoad(tabId) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Tab load timed out"));
+    }, 30000);
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timeout);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Injected into the Amazon search results page to extract product data.
+ * Runs in the page context (not the extension context).
+ */
+function extractAmazonProducts() {
+  let items = document.querySelectorAll('[data-component-type="s-search-result"]');
+  if (items.length === 0) items = document.querySelectorAll('[data-asin]:not([data-asin=""])');
+
+  const results = [];
+  items.forEach((item) => {
+    try {
+      const asin = item.getAttribute("data-asin");
+      if (!asin) return;
+
+      const isSponsored = item.querySelector(".puis-sponsored-label-text") !== null;
+
+      // Title from second h2 (first h2 is brand name)
+      let title = "";
+      const h2List = item.querySelectorAll("h2");
+      if (h2List.length >= 2) {
+        title = h2List[1].textContent.trim();
+      }
+      if (!title) {
+        const img = item.querySelector("img.s-image");
+        if (img) {
+          title = (img.getAttribute("alt") || "").replace(/^Sponsored Ad - /, "");
+        }
+      }
+      if (!title) return;
+
+      // Brand from first h2
+      let brand = "";
+      if (h2List.length >= 1) {
+        brand = h2List[0].textContent.trim();
+      }
+
+      // Product URL
+      let product_url = "https://www.amazon.com/dp/" + asin;
+      const titleLink = item.querySelector('a.s-line-clamp-2, a[class*="s-link-style"][class*="a-text-normal"]');
+      if (titleLink) {
+        const href = titleLink.getAttribute("href") || "";
+        if (href && !href.includes("/sspa/click")) {
+          product_url = href.startsWith("http") ? href : "https://www.amazon.com" + href;
+        }
+      }
+
+      // Price
+      let price = "";
+      const priceSpan = item.querySelector(".a-price .a-offscreen");
+      if (priceSpan) price = priceSpan.textContent.trim();
+
+      // Rating
+      let rating = "";
+      const ratingEl = item.querySelector('[aria-label*="out of 5"]');
+      if (ratingEl) {
+        const m = ratingEl.getAttribute("aria-label").match(/([\d.]+)/);
+        if (m) rating = m[1];
+      }
+
+      // Popularity
+      let review_count = "";
+      const fullText = item.textContent;
+      const boughtMatch = fullText.match(/([\dK,]+\+?) bought in past month/);
+      if (boughtMatch) review_count = boughtMatch[1] + " bought";
+
+      // Image
+      const imgEl = item.querySelector("img.s-image");
+      const image_url = imgEl ? (imgEl.getAttribute("src") || "") : "";
+      if (!image_url) return;
+
+      results.push({
+        title: brand ? brand + " " + title : title,
+        price,
+        rating,
+        review_count,
+        image_url,
+        product_url,
+        _sponsored: isSponsored,
+      });
+    } catch (e) {}
+  });
+
+  // Sort: organic first, then sponsored
+  results.sort((a, b) => (a._sponsored ? 1 : 0) - (b._sponsored ? 1 : 0));
+  results.forEach((p) => delete p._sponsored);
+
+  return results;
+}
 
 console.log("[GeminiTryOnMe] Background service worker started.");
