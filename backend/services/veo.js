@@ -60,15 +60,19 @@ async function generateVideo(imageBase64, prompt, sex) {
 
   const finalPrompt = prompt || defaultPrompt;
 
-  // Submit the video generation job
+  // Submit the video generation job using referenceImages (asset mode)
+  // for identity/face preservation instead of first-frame image mode
   let operation = await ai.models.generateVideos({
     model: VEO_MODEL,
     prompt: finalPrompt,
-    image: {
-      imageBytes: resizedBuffer.toString("base64"),
-      mimeType: "image/png",
-    },
     config: {
+      referenceImages: [{
+        image: {
+          imageBytes: resizedBuffer.toString("base64"),
+          mimeType: "image/png",
+        },
+        referenceType: "asset",
+      }],
       aspectRatio: "9:16",
       durationSeconds: 8,
       numberOfVideos: 1,

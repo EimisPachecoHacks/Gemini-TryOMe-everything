@@ -851,7 +851,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     } else {
       sendResponse({ success: false, error: "No video to save. Generate a video first." });
     }
-    return false;
+    return true;
   }
 
   if (message.type === "VOICE_SELECT_SEARCH_ITEM") {

@@ -2295,7 +2295,7 @@ document.addEventListener('DOMContentLoaded', init);
         case 'save_video': {
           // Send message to content script to save the current video
           sendMsg({ type: 'SAVE_VIDEO', source: lastTryOnSource || 'search' }).then((result) => {
-            sendToolResp(call.id, call.name, result?.success ? 'Video saved' : 'Video saved');
+            sendToolResp(call.id, call.name, result?.success ? 'Video saved' : 'Failed to save video. Generate a video first.');
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No video to save. Generate a video first.');
           });

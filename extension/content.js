@@ -174,7 +174,7 @@
       } else {
         sendResponse({ success: false, error: "No video to save" });
       }
-      return false;
+      return true;
     }
 
     if (msg.type !== "CONTEXT_MENU_TRYON") return false;
