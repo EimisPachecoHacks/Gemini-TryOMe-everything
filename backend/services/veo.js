@@ -18,6 +18,32 @@ function getClient() {
   return genaiClient;
 }
 
+/**
+ * Retry a function up to 3 times on 429 errors with exponential backoff.
+ */
+async function retry429(fn, label = "api") {
+  const MAX = 3;
+  const BASE_MS = 2000;
+  let lastErr;
+  for (let i = 0; i <= MAX; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = (err?.message || "").toLowerCase();
+      const is429 = err?.status === 429 || err?.statusCode === 429 || msg.includes("429") || msg.includes("too many requests") || msg.includes("resource exhausted") || msg.includes("rate limit");
+      if (is429 && i < MAX) {
+        const delay = BASE_MS * Math.pow(2, i);
+        console.warn(`[${label}] 429 rate limited (attempt ${i + 1}/${MAX + 1}), retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 const VEO_MODEL = "veo-3.1-generate-preview";
 const POLL_INTERVAL_MS = 10000; // 10 seconds between polls
 const MAX_POLL_ATTEMPTS = 60; // 10 minutes max wait
@@ -56,29 +82,26 @@ async function generateVideo(imageBase64, prompt, sex) {
     `${pronoun} confidently poses and slowly transitions between elegant poses — turning slightly, shifting weight, ` +
     `tilting head, and adjusting posture to showcase the clothing from different angles. ` +
     "The movements should be smooth, natural, and graceful like a high-end fashion commercial. " +
-    "CRITICAL: Keep the person's face, facial features, and body EXACTLY as shown in the image — do not alter or exaggerate any features.";
+    "CRITICAL IDENTITY PRESERVATION: The person's face, facial features, skin tone, hair color, hair style, body shape, and body proportions must remain EXACTLY as shown in the input image throughout the entire video. " +
+    "Do NOT alter, exaggerate, slim, widen, or modify any physical features. The person in every frame must be clearly recognizable as the same person in the input image.";
 
   const finalPrompt = prompt || defaultPrompt;
 
-  // Submit the video generation job using referenceImages (asset mode)
-  // for identity/face preservation instead of first-frame image mode
-  let operation = await ai.models.generateVideos({
+  // Submit the video generation job using image as first-frame reference (with 429 retry)
+  let operation = await retry429(() => ai.models.generateVideos({
     model: VEO_MODEL,
     prompt: finalPrompt,
+    image: {
+      imageBytes: resizedBuffer.toString("base64"),
+      mimeType: "image/png",
+    },
     config: {
-      referenceImages: [{
-        image: {
-          imageBytes: resizedBuffer.toString("base64"),
-          mimeType: "image/png",
-        },
-        referenceType: "asset",
-      }],
       aspectRatio: "9:16",
-      durationSeconds: 8,
+      durationSeconds: 6,
       numberOfVideos: 1,
       personGeneration: "allow_adult",
     },
-  });
+  }), "veo");
 
   console.log("[veo] generateVideo - job submitted, polling for completion...");
 

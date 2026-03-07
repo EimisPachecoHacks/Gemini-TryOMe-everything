@@ -146,11 +146,13 @@ module.exports = async function handleConnection(ws, req) {
     // --- Tool response ---
     if (msg.toolResponse?.functionResponses) {
       try {
+        const respSummary = msg.toolResponse.functionResponses.map(r => `${r.name}: ${JSON.stringify(r.response?.result || '').substring(0, 150)}`).join(', ');
+        console.log(`[voiceLive] 📨 Client tool response → Gemini: ${respSummary}`);
         session.sendToolResponse({
           functionResponses: msg.toolResponse.functionResponses,
         });
         pendingToolCall = false;
-        console.log("[voice-live] Tool response sent — audio ungated");
+        console.log("[voiceLive] Tool response sent — audio ungated");
       } catch (e) {
         console.warn("[voice-live] Error sending tool response:", e.message);
       }
@@ -242,6 +244,8 @@ function handleGeminiMessage(ws, msg, setPendingToolCall) {
   // Tool calls — forward to client for execution and gate audio
   if (msg.toolCall?.functionCalls) {
     setPendingToolCall(true);
+    const callSummary = msg.toolCall.functionCalls.map(c => `${c.name}(${JSON.stringify(c.args || {}).substring(0, 200)})`).join(', ');
+    console.log(`[voiceLive] 🔧 Gemini tool calls → client: ${callSummary}`);
     sendJSON(ws, {
       toolCall: { functionCalls: msg.toolCall.functionCalls },
     });
@@ -249,6 +253,7 @@ function handleGeminiMessage(ws, msg, setPendingToolCall) {
 
   // Tool call cancellation
   if (msg.toolCallCancellation?.ids) {
+    console.log(`[voiceLive] ❌ Tool calls cancelled: ${JSON.stringify(msg.toolCallCancellation.ids)}`);
     sendJSON(ws, {
       toolCallCancellation: { ids: msg.toolCallCancellation.ids },
     });

@@ -55,7 +55,7 @@ Analyze the product image and information provided, then return a JSON response 
   "garmentClass": "UPPER_BODY" | "LOWER_BODY" | "FULL_BODY" | "FOOTWEAR" | null,
   "garmentSubClass": "LONG_SLEEVE_SHIRT" | "SHORT_SLEEVE_SHIRT" | "NO_SLEEVE_SHIRT" | "LONG_PANTS" | "SHORT_PANTS" | "LONG_DRESS" | "SHORT_DRESS" | "FULL_BODY_OUTFIT" | "SHOES" | "BOOTS" | null,
   "cosmeticType": "lipstick" | "eyeshadow" | "blush" | "foundation" | "eyeliner" | "mascara" | null,
-  "accessoryType": "earrings" | "necklace" | "bracelet" | "ring" | "sunglasses" | null,
+  "accessoryType": "earrings" | "necklace" | "bracelet" | "ring" | "sunglasses" | "hat" | null,
   "color": "the primary color of the product",
   "styleTips": ["tip1", "tip2", "tip3"]
 }
@@ -76,7 +76,8 @@ Classification rules:
 - Bracelet, bangle, wrist chain → category: "accessories", accessoryType: "bracelet"
 - Ring, finger ring, band → category: "accessories", accessoryType: "ring"
 - Sunglasses, eyeglasses, glasses → category: "accessories", accessoryType: "sunglasses"
-- Watches, bags, hats, scarves → category: "unsupported"
+- Hat, cap, beanie, headband, headpiece, hair chain, head chain, tiara, hair accessory → category: "accessories", accessoryType: "hat"
+- Watches, bags, scarves → category: "unsupported"
 - Everything else → category: "unsupported"
 
 CRITICAL classification rules — apply in this EXACT priority order:
@@ -94,7 +95,11 @@ RULE 3 — SINGLE-PIECE KEYWORDS (only if Rules 1-2 do not apply):
 - If the product TITLE contains "top", "shirt", "blouse", "crop top", "hoodie", "jacket", "sweater" → category: "clothing", garmentClass: "UPPER_BODY", even if the image shows matching pants.
 - If the product TITLE contains "pants", "jeans", "skirt", "shorts", "leggings" → category: "clothing", garmentClass: "LOWER_BODY", even if the image shows a matching top.
 
-RULE 4 — AMBIGUOUS (only if title has no keywords from above):
+RULE 4 — ACCESSORY TITLE KEYWORDS (applies before RULE 5):
+- If the product TITLE mentions what the product IS (e.g. "headpiece", "head chain", "earrings", "necklace", "bracelet", "ring", "sunglasses", "hat", "cap", "headband", "tiara"), classify as category: "accessories" with the appropriate accessoryType. The TITLE is the most reliable signal — trust it over how the image looks.
+- NEVER classify a product as "unsupported" if the title clearly indicates it is a wearable accessory.
+
+RULE 5 — AMBIGUOUS (only if title has no keywords from above):
 - If the image shows a MATCHING SET (top + bottom sold together) and the title does NOT contain any of the keywords above, classify based on the most prominent piece in the image.
 
 For styleTips, provide 2-3 short, helpful fashion tips about how to style or wear this product.
@@ -371,4 +376,106 @@ function classifyByTitle(title) {
   return { category: "clothing", garmentClass: "UPPER_BODY", color: null, styleTips: [] };
 }
 
-module.exports = { analyzeProduct, classifyOutfit, hasPersonInImage };
+/**
+ * Classify a text search query to determine product category and whether
+ * size / shoe size / sex should be appended to the search.
+ *
+ * Uses Gemini for AI classification with classifyByTitle as fallback.
+ *
+ * @param {string} queryText - The user's search query (e.g. "red summer dress")
+ * @returns {Promise<{ category: string, needsClothingSize: boolean, needsShoeSize: boolean, needsSex: boolean }>}
+ */
+async function classifyQuery(queryText) {
+  const systemPrompt = `You are a product search classification assistant. Given a search query, determine what type of product it is.
+
+Return a JSON response:
+{
+  "category": "clothing" | "footwear" | "cosmetics" | "accessories" | "unsupported",
+  "needsClothingSize": true | false,
+  "needsShoeSize": true | false,
+  "needsSex": true | false
+}
+
+Rules:
+- clothing (shirts, pants, dresses, jackets, leggings, hoodies, etc.): needsClothingSize=true, needsShoeSize=false, needsSex=true
+- footwear (shoes, boots, sneakers, sandals, heels, slippers): needsClothingSize=false, needsShoeSize=true, needsSex=true
+- cosmetics (lipstick, foundation, mascara, eyeshadow, skincare, perfume, etc.): all false
+- accessories (earrings, necklace, bracelet, ring, sunglasses, watch, bag, hat): all false
+- unsupported (electronics, food, furniture, etc.): all false
+
+IMPORTANT: Return ONLY valid JSON, no additional text.`;
+
+  try {
+    const client = getClient();
+    const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [{ role: "user", parts: [{ text: `Search query: "${queryText}"\n\nClassify this product search query. Return JSON only.` }] }],
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: "application/json",
+        maxOutputTokens: 256,
+        temperature: 0.0,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    }), GEMINI_TIMEOUT_MS, "classifyQuery"));
+
+    const responseText = response.text || response.candidates[0].content.parts[0].text;
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+
+    try {
+      const parsed = JSON.parse(jsonStr);
+      return {
+        category: parsed.category || "clothing",
+        needsClothingSize: !!parsed.needsClothingSize,
+        needsShoeSize: !!parsed.needsShoeSize,
+        needsSex: !!parsed.needsSex,
+      };
+    } catch {
+      const objectMatch = responseText.match(/\{[\s\S]*\}/);
+      if (objectMatch) {
+        const parsed = JSON.parse(objectMatch[0]);
+        return {
+          category: parsed.category || "clothing",
+          needsClothingSize: !!parsed.needsClothingSize,
+          needsShoeSize: !!parsed.needsShoeSize,
+          needsSex: !!parsed.needsSex,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[classifier] classifyQuery AI failed, falling back to title-based:", err.message);
+  }
+
+  // Fallback: use regex-based classification
+  return classifyQueryByTitle(queryText);
+}
+
+/**
+ * Fallback regex-based classification for search queries.
+ * Mirrors classifyByTitle logic but returns size/sex flags.
+ */
+function classifyQueryByTitle(text) {
+  const t = (text || "").toLowerCase();
+
+  // Cosmetics — no size needed
+  if (/lipstick|lip\s*(gloss|balm|color|stain|tint)|eye\s*shadow|eye\s*palette|blush|bronzer|highlighter|foundation|concealer|powder|bb\s*cream|eyeliner|eye\s*pencil|kohl|mascara|lash|perfume|fragrance|skincare|serum|moisturizer|sunscreen/i.test(t)) {
+    return { category: "cosmetics", needsClothingSize: false, needsShoeSize: false, needsSex: false };
+  }
+
+  // Accessories — no size needed
+  if (/earring|ear\s*(stud|cuff|hoop)|necklace|pendant|chain|choker|bracelet|bangle|\bring\b|finger\s*ring|sunglasses|eyeglasses|watch|bag|purse|handbag|hat|scarf|belt/i.test(t)) {
+    return { category: "accessories", needsClothingSize: false, needsShoeSize: false, needsSex: false };
+  }
+
+  // Footwear — shoe size needed
+  if (/shoe|boot|sandal|sneaker|heel|slipper|loafer|mule|flip\s*flop|clog/i.test(t)) {
+    return { category: "footwear", needsClothingSize: false, needsShoeSize: true, needsSex: true };
+  }
+
+  // Default: clothing — clothing size needed
+  return { category: "clothing", needsClothingSize: true, needsShoeSize: false, needsSex: true };
+}
+
+module.exports = { analyzeProduct, classifyOutfit, hasPersonInImage, classifyQuery, classifyQueryByTitle };

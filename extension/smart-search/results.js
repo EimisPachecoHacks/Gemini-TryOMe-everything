@@ -424,9 +424,18 @@ function storeDebugImages(bodyPhotoBase64, garmentBase64, debugInfo) {
   });
 }
 
+let isTryOnInProgress = false;
+
 async function handleTryOn(index) {
+  // Guard against concurrent/duplicate try-on calls
+  if (isTryOnInProgress) {
+    console.warn(`[SmartSearch] ⚠️ BLOCKED duplicate try-on call for item #${index + 1} — try-on already in progress`);
+    return;
+  }
+  isTryOnInProgress = true;
+
   const card = document.querySelectorAll(".nova-card")[index];
-  if (!card) return;
+  if (!card) { isTryOnInProgress = false; return; }
 
   const product = JSON.parse(card.dataset.product);
   const btn = card.querySelector(".nova-btn-primary");
@@ -518,6 +527,8 @@ async function handleTryOn(index) {
         storeDebugImages(debugBodyPhoto, garmentBase64, debugInfo);
       }
       showTryOnResult(resultImage, product, response.styleTips || analysisResult?.styleTips || []);
+      // Notify voice agent that try-on result is visible
+      chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
     } else {
       throw new Error(response?.error || "Try-on failed — no result image returned");
     }
@@ -527,6 +538,7 @@ async function handleTryOn(index) {
     closeTryOnModal();
     showPageToast("Try-on failed: " + err.message);
   } finally {
+    isTryOnInProgress = false;
     if (btn) {
       btn.disabled = false;
       btn.innerHTML = "&#10024; Try On";
@@ -675,6 +687,8 @@ async function handleAnimate(body, resultImageBase64, btn, product) {
 
     clearInterval(videoTimerInterval);
     const videoElapsed = ((Date.now() - videoStart) / 1000).toFixed(1);
+    // Notify voice agent that video is ready
+    chrome.runtime.sendMessage({ type: 'VIDEO_COMPLETE' });
 
     // Display the video
     const videoContainer = document.createElement("div");
@@ -858,7 +872,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const index = message.number - 1; // convert 1-based to 0-based
     const cards = document.querySelectorAll(".nova-card");
     if (index >= 0 && index < cards.length) {
-      console.log("[SmartSearch] Voice selecting item #" + message.number);
+      console.log("[SmartSearch] Voice selecting item #" + message.number + " (cards: " + cards.length + ")");
       // Scroll into view and highlight
       cards[index].scrollIntoView({ behavior: "smooth", block: "center" });
       cards[index].style.outline = "3px solid #FF9900";

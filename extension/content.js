@@ -153,16 +153,21 @@
       return false;
     }
 
-    // Voice agent: animate try-on result
+    // Voice agent: animate try-on result (with retry for timing)
     if (msg.type === "ANIMATE_TRYON") {
-      const animateBtn = document.querySelector(".nova-tryon-animate-btn:not(:disabled)");
-      if (animateBtn) {
-        animateBtn.click();
-        sendResponse({ success: true });
-      } else {
-        sendResponse({ success: false, error: "No try-on result to animate" });
-      }
-      return false;
+      const tryClick = (retries) => {
+        const animateBtn = document.querySelector(".nova-tryon-animate-btn:not(:disabled)");
+        if (animateBtn) {
+          animateBtn.click();
+          sendResponse({ success: true });
+        } else if (retries > 0) {
+          setTimeout(() => tryClick(retries - 1), 500);
+        } else {
+          sendResponse({ success: false, error: "No try-on result to animate" });
+        }
+      };
+      tryClick(4); // retry up to 4 times (2 seconds total)
+      return true; // keep message port open for async response
     }
 
     // Voice agent: save video
@@ -645,8 +650,9 @@
     // Concurrency guard: each call gets an ID; if a newer call starts, older ones stop updating the UI
     const thisRequestId = ++tryOnRequestId;
 
+    const tryOnType = isCosmetic ? "COSMETIC" : currentIsAccessory ? "ACCESSORY" : "CLOTHING";
     console.log(
-      "%c 🔥 TRY-ON START %c " + (isCosmetic ? "COSMETIC" : "CLOTHING") + " (req#" + thisRequestId + ")",
+      "%c 🔥 TRY-ON START %c " + tryOnType + " (req#" + thisRequestId + ")",
       "background:#FF6600;color:#fff;font-weight:bold;padding:4px 8px;border-radius:4px;font-size:14px;",
       "color:#FF6600;font-weight:bold;font-size:14px;"
     );
@@ -667,6 +673,27 @@
         chrome.storage.local.get(["selectedPoseIndex"], (r) => resolve(r.selectedPoseIndex || 0));
       });
 
+      // Always re-fetch photos fresh so face selection changes are picked up (10s timeout)
+      const photoFetchStart = Date.now();
+      try {
+        const freshPhotos = await Promise.race([
+          new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ type: "GET_USER_PHOTOS" }, (res) => {
+              if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+              resolve(res && res.data ? res.data : null);
+            });
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("GET_USER_PHOTOS timed out after 10s")), 10000)),
+        ]);
+        if (freshPhotos) {
+          photos = freshPhotos;
+          currentPhotos = freshPhotos;
+        }
+        console.log(`[GeminiTryOnMe] Photo fetch completed in ${((Date.now() - photoFetchStart) / 1000).toFixed(1)}s — facePhoto: ${photos.facePhoto ? 'yes' : 'NO'}, bodyPhoto: ${photos.bodyPhoto ? 'yes' : 'NO'}`);
+      } catch (fetchErr) {
+        console.warn(`[GeminiTryOnMe] Fresh photo fetch failed after ${((Date.now() - photoFetchStart) / 1000).toFixed(1)}s, using cached:`, fetchErr.message);
+      }
+
       // Guard: if analysisResult is null, re-analyze before proceeding
       if (!analysisResult && productImageBase64 && productData) {
         console.log("[GeminiTryOnMe] analysisResult is null, re-analyzing before try-on...");
@@ -682,19 +709,26 @@
         }
       }
 
+      console.log(`[GeminiTryOnMe] Routing: isCosmetic=${isCosmetic}, currentIsAccessory=${currentIsAccessory}, accessoryType=${analysisResult ? analysisResult.accessoryType : 'N/A'}`);
+
       if (isCosmetic) {
+        console.log(`[GeminiTryOnMe] → Calling ApiClient.tryOnCosmetics (type: ${analysisResult.cosmeticType || "lipstick"}, color: ${analysisResult.color || "N/A"}, hasProductImage: ${!!productImageBase64})`);
         const response = await ApiClient.tryOnCosmetics(
           photos.facePhoto,
           analysisResult.cosmeticType || "lipstick",
-          analysisResult.color || null
+          analysisResult.color || null,
+          productImageBase64
         );
         resultImage = response.resultImage;
       } else if (currentIsAccessory) {
+        console.log(`[GeminiTryOnMe] → Calling ApiClient.tryOnAccessory (type: ${analysisResult.accessoryType || "earrings"}, facePhoto: ${photos.facePhoto ? photos.facePhoto.substring(0, 20) + '...' : 'NULL'})`);
+        const accessoryStart = Date.now();
         const response = await ApiClient.tryOnAccessory(
           photos.facePhoto,
           productImageBase64,
           analysisResult.accessoryType || "earrings"
         );
+        console.log(`[GeminiTryOnMe] ← ApiClient.tryOnAccessory completed in ${((Date.now() - accessoryStart) / 1000).toFixed(1)}s`);
         resultImage = response.resultImage;
       } else {
         // Send null as bodyImage so backend fetches the correct pose from GCS using poseIndex
@@ -754,6 +788,8 @@
       // Display the result (minimal overlay — controls are in the side panel)
       // Remove inert so buttons/interactions work now that result is ready
       body.removeAttribute("inert");
+      // Notify voice agent that try-on result is visible
+      chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
       const resultDataUrl = base64ToDataUrl(resultImage);
       body.innerHTML = `
         <div class="nova-tryon-result">
@@ -919,7 +955,7 @@
       body.innerHTML = `
         <div class="nova-tryon-error">
           <div class="nova-tryon-error-icon">&#9888;</div>
-          <div class="nova-tryon-error-text">Something went wrong</div>
+          <div class="nova-tryon-error-text">Try-on failed</div>
           <div class="nova-tryon-error-detail">${String(err.message).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
           <button class="nova-tryon-retry-btn">Try Again</button>
         </div>
@@ -1051,6 +1087,22 @@
       return;
     }
 
+    // Re-fetch photos to pick up any face selection changes (10s timeout)
+    try {
+      const freshPhotos = await Promise.race([
+        new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: "GET_USER_PHOTOS" }, (res) => {
+            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+            resolve(res && res.data ? res.data : currentPhotos);
+          });
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("GET_USER_PHOTOS timed out after 10s")), 10000)),
+      ]);
+      if (freshPhotos) currentPhotos = freshPhotos;
+    } catch (fetchErr) {
+      console.warn("[GeminiTryOnMe] Fresh photo fetch failed in variation handler, using cached:", fetchErr.message);
+    }
+
     // Auto-refresh the try-on overlay
     console.log("[GeminiTryOnMe]   → Checking overlay state: panelOpen=%s, overlayCard=%s, currentPhotos=%s", panelOpen, !!overlayCard, !!currentPhotos);
     if (panelOpen && overlayCard && currentPhotos && analysisResult) {
@@ -1172,6 +1224,8 @@
 
       clearInterval(videoTimerInterval);
       const videoElapsed = ((Date.now() - videoStart) / 1000).toFixed(1);
+      // Notify voice agent that video is ready
+      chrome.runtime.sendMessage({ type: 'VIDEO_COMPLETE' });
 
       // Display the video
       const videoContainer = document.createElement("div");

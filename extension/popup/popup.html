@@ -516,6 +516,7 @@
           <button class="search-mode-tab active" id="tabSmartSearch" data-mode="single">&#10024; Search</button>
           <button class="search-mode-tab" id="tabOutfitBuilder" data-mode="outfit">&#128090; Outfit</button>
           <button class="search-mode-tab" id="tabCosmetics" data-mode="cosmetics">&#128132; Beauty</button>
+          <button class="search-mode-tab" id="tabCompare" data-mode="compare">&#128176; Compare</button>
         </div>
 
         <!-- Single Item Search -->
@@ -559,6 +560,17 @@
           </div>
           <button class="btn btn-primary btn-full" id="outfitBuildBtn">Build Outfit</button>
           <div class="smart-search-error" id="outfitBuildError"></div>
+        </div>
+
+        <!-- Price Compare — Google Shopping -->
+        <div class="search-mode-panel hidden" id="panelCompare">
+          <p class="smart-search-desc">Compare Amazon prices with Walmart, Shein, Temu &amp; Poshmark</p>
+          <div class="smart-search-row">
+            <input type="text" id="compareSearchInput" class="text-input" placeholder="e.g. red summer dress" />
+            <button class="btn btn-primary btn-small" id="compareSearchBtn">Compare</button>
+          </div>
+          <div class="smart-search-error" id="compareSearchError"></div>
+          <div id="compareResults" class="compare-results"></div>
         </div>
 
         <!-- Cosmetics / Beauty — Face Selector -->

@@ -668,6 +668,8 @@ async function handleTryOn() {
     lastTryOnResultBase64 = result.resultImage;
     showTryOnResult(result.resultImage);
     console.log(`[Wardrobe] Outfit try-on complete! (${result.totalTime || "?"})`);
+    // Notify voice agent that outfit try-on result is visible
+    chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
 
     // Show Save to Favorites + Animate buttons
     const favBtn = document.getElementById("favoriteBtn");
@@ -954,6 +956,8 @@ async function handleAnimate() {
 
     clearInterval(videoTimerInterval);
     const elapsed = ((Date.now() - videoStart) / 1000).toFixed(1);
+    // Notify voice agent that video is ready
+    chrome.runtime.sendMessage({ type: 'VIDEO_COMPLETE' });
 
     const videoSrc = videoResult.videoBase64
       ? "data:" + (videoResult.videoMimeType || "video/mp4") + ";base64," + videoResult.videoBase64

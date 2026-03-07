@@ -22,6 +22,7 @@ const accountRoutes = require("./routes/account");
 const cartRoutes = require("./routes/cart");
 const shareRoutes = require("./routes/share");
 const recommendRoutes = require("./routes/recommend");
+const classifyQueryRoutes = require("./routes/classifyQuery");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -64,6 +65,7 @@ app.use("/api/video", aiLimiter);
 app.use("/api/analyze", aiLimiter);
 app.use("/api/smart-search", aiLimiter);
 app.use("/api/recommend", aiLimiter);
+app.use("/api/classify-query", aiLimiter);
 
 // Auth rate limit (prevent brute force)
 const authLimiter = rateLimit({
@@ -127,6 +129,7 @@ app.use("/api/account", accountRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/share", shareRoutes);
 app.use("/api/recommend", recommendRoutes);
+app.use("/api/classify-query", classifyQueryRoutes);
 
 // Voice config endpoint — provides API key + config for direct client-to-Gemini connection
 const giselleLive = require("./services/giselleLive");
@@ -151,11 +154,9 @@ app.use((err, req, res, next) => {
   console.error("Stack:", err.stack);
 
   const statusCode = err.statusCode || 500;
-  // Pass through meaningful API errors (rate limits, quota, etc.) but hide stack traces
-  let clientMessage = "Internal server error";
-  if (statusCode < 500) {
-    clientMessage = err.message || "Internal server error";
-  } else if (err.message && (err.message.includes("RESOURCE_EXHAUSTED") || err.message.includes("quota"))) {
+  // Pass through meaningful error messages but hide stack traces
+  let clientMessage = err.message || "Internal server error";
+  if (err.message && (err.message.includes("RESOURCE_EXHAUSTED") || err.message.includes("quota"))) {
     clientMessage = "AI service rate limit exceeded — please wait a moment and try again";
   } else if (err.message && err.message.includes("429")) {
     clientMessage = "Too many requests — please wait a moment and try again";

@@ -46,7 +46,7 @@ function getClient() {
  * @param {object} outfitInfo - Classification of what the person is currently wearing
  * @returns {string} The prompt to send to the image generation model
  */
-function buildSmartPrompt(garmentClass, outfitInfo, framing) {
+function buildSmartPrompt(garmentClass, outfitInfo, framing, productTitle) {
   const currentType = outfitInfo?.currentType || "UPPER_LOWER";
 
   // Half-body framing instruction (waist-up) — applicable to upper body garments and full body
@@ -92,18 +92,18 @@ function buildSmartPrompt(garmentClass, outfitInfo, framing) {
     return `You are a professional virtual try-on system. Take the person in the first image and put on the footwear shown in the second image. Replace ONLY the shoes/footwear. IMPORTANT: Keep ALL clothing (shirt, pants, dress, etc.) EXACTLY the same — do NOT change any clothing item. ${STUDIO_SUFFIX}`;
   }
 
-  // Trying on a full body garment (dress/jumpsuit): always replaces everything
-  if (garmentClass === "FULL_BODY") {
-    return `You are a professional virtual try-on system. Take the person in the first image and dress them in the full body garment (dress/jumpsuit) shown in the second image. Replace the ENTIRE outfit with this garment. ${STUDIO_SUFFIX}`;
+  // Trying on a full body garment (dress, jumpsuit, or matching set): always replaces everything
+  if (["FULL_BODY", "LONG_DRESS", "SHORT_DRESS", "FULL_BODY_OUTFIT"].includes(garmentClass)) {
+    return `You are a professional virtual try-on system. Take the person in the first image. COMPLETELY REMOVE all their current clothing — every single piece (top, bottom, everything). Then dress them in the COMPLETE outfit shown in the second image. IMPORTANT: The second image may show a SINGLE garment (dress, jumpsuit) OR a MATCHING SET (top + bottom sold together, such as a tankini set, co-ord set, swimsuit set, pajama set). If it is a matching set with multiple pieces, you MUST put ALL pieces on the person — both the top AND the bottom. The person must be wearing NOTHING except the garment(s) from the second image. Reproduce every detail of the garment(s) faithfully: pattern, print, color, fabric texture, cut, and fit. ${STUDIO_SUFFIX}`;
   }
 
   // Person wearing separate top+bottom (no conflict for top or bottom)
   if (currentType === "UPPER_LOWER") {
     if (garmentClass === "UPPER_BODY") {
-      return `You are a professional virtual try-on system. Take the person in the first image and replace ONLY their upper body clothing (shirt/top/blouse) with the garment shown in the second image. IMPORTANT: Keep the lower body clothing (pants/skirt/shorts) EXACTLY the same — do NOT change, replace, or alter the bottom clothing in any way. The bottom half must remain identical to the original photo. If the garment image shows matching pants or a set, IGNORE the pants — only use the top piece. ${STUDIO_SUFFIX}`;
+      return `You are a professional virtual try-on system. Take the person in the first image. COMPLETELY REMOVE their current upper body clothing (shirt/top/blouse) — it must disappear entirely. Then put the NEW garment from the second image directly on their body as their only top. The new garment must sit directly on the person's body, NOT layered on top of existing clothes. IMPORTANT: Keep the lower body clothing (pants/skirt/shorts) EXACTLY the same — do NOT change the bottom clothing. If the garment image shows matching pants or a set, IGNORE the pants — only use the top piece. ${STUDIO_SUFFIX}`;
     }
     if (garmentClass === "LOWER_BODY") {
-      return `You are a professional virtual try-on system. Take the person in the first image and replace ONLY their lower body clothing (pants/skirt/shorts) with the garment shown in the second image. IMPORTANT: Keep the upper body clothing (shirt/top) EXACTLY the same — do NOT change, replace, or alter the top clothing in any way. The top half must remain identical to the original photo. ${STUDIO_SUFFIX}`;
+      return `You are a professional virtual try-on system. Take the person in the first image. COMPLETELY REMOVE their current lower body clothing (pants/skirt/shorts) — it must disappear entirely. Then put the NEW garment from the second image directly on their body as their only bottom. The new garment must sit directly on the person's body, NOT layered on top of existing clothes. IMPORTANT: Keep the upper body clothing (shirt/top) EXACTLY the same — do NOT change the top clothing. ${STUDIO_SUFFIX}`;
     }
   }
 
@@ -134,7 +134,7 @@ function buildSmartPrompt(garmentClass, outfitInfo, framing) {
     }
   }
 
-  // Fallback: generic try-on
+  // Fallback: generic try-on — use product title if available for context
   const garmentDescriptions = {
     UPPER_BODY: "upper body clothing (shirt/top/blouse/jacket)",
     LOWER_BODY: "lower body clothing (pants/shorts/skirt)",
@@ -142,7 +142,8 @@ function buildSmartPrompt(garmentClass, outfitInfo, framing) {
     FOOTWEAR: "footwear (shoes/boots/sandals)",
   };
   const garmentDesc = garmentDescriptions[garmentClass] || "clothing";
-  return `You are a professional virtual try-on system. Take the person in the first image and dress them in the garment shown in the second image. Replace ONLY the ${garmentDesc} with the garment from the second image. Keep all other clothing exactly the same. ${STUDIO_SUFFIX}`;
+  const titleContext = productTitle ? ` The product is: "${productTitle}". Use this name to understand exactly what this item is and where it should be placed on the body. If this is an accessory (headpiece, hat, jewelry, etc.), ADD it to the person without removing any existing clothing.` : "";
+  return `You are a professional virtual try-on system. Take the person in the first image and dress them in the item shown in the second image.${titleContext} Replace ONLY the ${garmentDesc} with the item from the second image. Keep all other clothing exactly the same. ${STUDIO_SUFFIX}`;
 }
 
 /**
@@ -165,53 +166,82 @@ async function virtualTryOn(sourceImageBase64, referenceImageBase64, garmentClas
   console.log(`\x1b[34m  │ strategy:\x1b[0m     \x1b[1m\x1b[33m${strategy}\x1b[0m`);
   console.log(`\x1b[34m  │ \x1b[1mFULL PROMPT:\x1b[0m`);
   console.log(`\x1b[33m  │ ${prompt}\x1b[0m`);
+  const modelId = garmentClass === "ACCESSORY" ? "gemini-3-pro-image-preview" : "gemini-3.1-flash-image-preview";
+  console.log(`\x1b[34m  │ model:\x1b[0m        \x1b[1m${modelId}\x1b[0m`);
   console.log(`\x1b[34m  └─── CALLING GEMINI API... ───┘\x1b[0m`);
 
-  const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
-    model: "gemini-3-pro-image-preview",
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: "This is the person. Keep this EXACT person — same face, skin, body, hair:" },
-          {
-            inlineData: {
-              mimeType: getMimeType(sourceImageBase64),
-              data: sourceImageBase64,
+  const MAX_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
+      model: modelId,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: "This is the person. Keep this EXACT person — same face, skin, body, hair:" },
+            {
+              inlineData: {
+                mimeType: getMimeType(sourceImageBase64),
+                data: sourceImageBase64,
+              },
             },
-          },
-          { text: "This is the garment to put on the person above:" },
-          {
-            inlineData: {
-              mimeType: getMimeType(referenceImageBase64),
-              data: referenceImageBase64,
+            { text: "This is the garment to put on the person above:" },
+            {
+              inlineData: {
+                mimeType: getMimeType(referenceImageBase64),
+                data: referenceImageBase64,
+              },
             },
-          },
-          { text: prompt },
-        ],
+            { text: attempt === 1 ? prompt : `CRITICAL: You MUST change the person's clothing. The person in IMAGE 1 is currently wearing different clothes — you MUST replace their current outfit with the garment shown in IMAGE 2. Do NOT return the person in their original clothing. The output image MUST show the person wearing the NEW garment.\n\n${prompt}` },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ["TEXT", "IMAGE"],
+        personGeneration: "ALLOW_ADULT",
+        systemInstruction: "You are a virtual clothing try-on system. You will receive exactly 2 images: IMAGE 1 is a real person (the customer), IMAGE 2 is a garment. Your ONLY job is to produce a single photo-realistic image of the EXACT same person from IMAGE 1 wearing the garment from IMAGE 2. IDENTITY RULE: The output person must have the IDENTICAL face, facial bone structure, nose, eyes, eyebrows, lips, skin color, hair color, hair style, and body proportions as IMAGE 1. Do NOT replace them with a model, do NOT alter their facial features, do NOT change their skin tone. If you cannot preserve the identity perfectly, try harder — identity fidelity is the #1 priority, above all else.",
       },
-    ],
-    config: {
-      responseModalities: ["TEXT", "IMAGE"],
-      systemInstruction: "You are a virtual clothing try-on system. You will receive exactly 2 images: IMAGE 1 is a real person (the customer), IMAGE 2 is a garment. Your ONLY job is to produce a single photo-realistic image of the EXACT same person from IMAGE 1 wearing the garment from IMAGE 2. IDENTITY RULE: The output person must have the IDENTICAL face, facial bone structure, nose, eyes, eyebrows, lips, skin color, hair color, hair style, and body proportions as IMAGE 1. Do NOT replace them with a model, do NOT alter their facial features, do NOT change their skin tone. If you cannot preserve the identity perfectly, try harder — identity fidelity is the #1 priority, above all else.",
-    },
-  }), GEMINI_TIMEOUT_MS, "virtualTryOn"));
+    }), GEMINI_TIMEOUT_MS, "virtualTryOn"));
 
-  // Extract the image from the response
-  const candidates = response.candidates || [];
-  if (!candidates.length) {
-    throw new Error("No response from Gemini");
-  }
-
-  const parts = candidates[0].content?.parts || [];
-  for (const part of parts) {
-    if (part.inlineData) {
-      console.log(`\x1b[32m  ✓ GEMINI RESPONSE RECEIVED\x1b[0m — image: ${part.inlineData.data.length} chars`);
-      return part.inlineData.data;
+    // Extract the image from the response
+    const candidates = response.candidates || [];
+    if (!candidates.length) {
+      if (attempt < MAX_ATTEMPTS) {
+        console.log(`\x1b[33m  ⟳ GEMINI attempt ${attempt} returned no candidates — retrying...\x1b[0m`);
+        continue;
+      }
+      throw new Error("No response from Gemini");
     }
+
+    const parts = candidates[0].content?.parts || [];
+    let resultData = null;
+    for (const part of parts) {
+      if (part.inlineData) {
+        resultData = part.inlineData.data;
+        break;
+      }
+    }
+
+    if (!resultData) {
+      if (attempt < MAX_ATTEMPTS) {
+        console.log(`\x1b[33m  ⟳ GEMINI attempt ${attempt} returned no image — retrying...\x1b[0m`);
+        continue;
+      }
+      throw new Error("No image in Gemini response");
+    }
+
+    // Validate: check if result is suspiciously similar in size to source (garment not applied)
+    const sizeDiff = Math.abs(resultData.length - sourceImageBase64.length) / sourceImageBase64.length;
+    if (sizeDiff < 0.05 && attempt < MAX_ATTEMPTS) {
+      console.log(`\x1b[33m  ⟳ GEMINI attempt ${attempt} result too similar to source (${(sizeDiff * 100).toFixed(1)}% size diff) — retrying with stronger prompt...\x1b[0m`);
+      continue;
+    }
+
+    console.log(`\x1b[32m  ✓ GEMINI RESPONSE RECEIVED\x1b[0m (attempt ${attempt}) — image: ${resultData.length} chars, sizeDiff: ${(sizeDiff * 100).toFixed(1)}%`);
+    return resultData;
   }
 
-  throw new Error("No image in Gemini response");
+  throw new Error("Gemini try-on failed after all attempts");
 }
 
 /**
@@ -224,20 +254,21 @@ async function extractGarment(imageBase64, garmentDescription) {
 
   const client = getClient();
 
-  const prompt = `You are a professional garment extraction system. The image shows a person/model wearing a garment${garmentDescription ? ` (${garmentDescription})` : ""}.
+  const isSet = garmentDescription && garmentDescription.includes("COMPLETE SET");
+  const prompt = `You are a professional garment extraction system. The image shows a person/model wearing ${isSet ? "a complete outfit/set" : "a garment"}${garmentDescription ? ` (${garmentDescription})` : ""}.
 
-Your task: Generate a NEW image showing ONLY the garment by itself, completely removed from the person. The garment should be displayed as a clean, flat product shot on a plain white background — as if it were laid flat or photographed on an invisible mannequin.
+Your task: Generate a NEW image showing ONLY the ${isSet ? "complete outfit (ALL pieces — top AND bottom)" : "garment"} by itself, completely removed from the person. The ${isSet ? "outfit pieces should be displayed together" : "garment should be displayed"} as a clean, flat product shot on a plain white background — as if ${isSet ? "they were" : "it were"} laid flat or photographed on an invisible mannequin.
 
 CRITICAL RULES:
 - Remove the person/model entirely — NO face, skin, hands, legs, or body parts should be visible
-- Show ONLY the garment itself, preserving its exact color, pattern, texture, design details, and proportions
-- Display the garment in a natural flat-lay or front-facing product orientation
+- ${isSet ? "Show ALL pieces of the outfit together (e.g., both the top AND the bottom/shorts). Do NOT extract only one piece — you MUST include every garment piece visible on the model." : "Show ONLY the garment itself, preserving its exact color, pattern, texture, design details, and proportions"}
+- Display in a natural flat-lay or front-facing product orientation
 - Use a clean, plain white background
-- The garment should fill most of the frame
+- The ${isSet ? "outfit pieces" : "garment"} should fill most of the frame
 - Photorealistic result. Output only the resulting image.`;
 
   const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
-    model: "gemini-3-pro-image-preview",
+    model: "gemini-3.1-flash-image-preview",
     contents: [
       {
         role: "user",
@@ -275,7 +306,7 @@ CRITICAL RULES:
 
 /**
  * Generate a profile photo using multi-reference identity preservation.
- * Sends 5 user reference images + 1 pose template to gemini-3.1-flash-image-preview.
+ * Sends 5 user reference images + 1 pose template to gemini-3-pro-image-preview.
  *
  * @param {string[]} userImages - Array of 5 base64 strings [body1, body2, body3, face1, face2]
  * @param {string} poseTemplateBase64 - Base64 of the pose template image

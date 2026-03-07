@@ -102,6 +102,37 @@ The outfit builder supports **6 categories**: top, bottom, shoes, necklace, earr
 - `autoTryOnFromVoice` MUST be declared at module level (top of file), not inside the voice agent scope
 - It is read by the `outfitBuildBtn` click handler AND set by the voice `build_outfit` tool handler — both must share the same scope
 
+### Voice Agent Audio/Echo — CRITICAL, DO NOT CHANGE
+
+The Gemini Live API has **NO built-in echo cancellation**. The following client-side logic in `popup.js` prevents echo-triggered self-interruption while preserving barge-in. These were extremely hard to get right — DO NOT modify them.
+
+**Energy-threshold gating** (in `workletNode.port.onmessage`):
+- When model is **silent** (`isModelSpeaking === false`): send ALL mic audio freely, automatic VAD handles it
+- When model is **speaking** (`isModelSpeaking === true`):
+  - First `ECHO_GRACE_MS` (1500ms): mic is fully muted to let browser AEC calibrate
+  - After grace period: only send audio if RMS > `BARGE_IN_RMS` (3000) for `BARGE_IN_CHUNKS` (3) consecutive chunks — allows real barge-in, blocks low-energy echo
+- Do NOT remove the energy-threshold gating or replace it with a full mic mute (breaks barge-in)
+- Do NOT remove the grace period (breaks greeting)
+- Do NOT increase `BARGE_IN_RMS` above ~5000 (makes barge-in too hard to trigger)
+- Do NOT decrease `ECHO_GRACE_MS` below 1000 (greeting will get cut off)
+
+**`isModelSpeaking` flag**:
+- Set to `true` when binary audio arrives from Gemini (with `modelSpeakingStartTime = Date.now()`)
+- Set to `false` on `turnComplete` or `interrupted`
+- MUST be reset to `false` on `setupComplete` (new session) — otherwise greeting is blocked
+
+**`muteNextModelTurn` flag** (prevents duplicate announcements):
+- Set to `true` after sending tool response for async operations (search, try-on, animate, etc.)
+- Suppresses the model's audio AND transcription for the next turn (the duplicate)
+- Cleared on `turnComplete`
+- MUST be reset to `false` on `setupComplete` (new session) — otherwise greeting is blocked
+- The output transcription check must use `&& !muteNextModelTurn` (NOT `return`) to avoid skipping subsequent event processing in `handleGeminiMessage`
+
+**Completion notifications** (`TRYON_COMPLETE`, `VIDEO_COMPLETE`):
+- Sent from content.js, results.js, wardrobe.js when operations finish
+- Forwarded to Gemini via `sendGeminiText()` as `clientContent` so the model knows the result is visible
+- Do NOT remove these — without them the model doesn't know when operations finish
+
 ## Tests
 - Run: `cd backend && npm test`
 - `__tests__/outfitBuilder.test.js` — validates 6-category search, concurrency limiter, outfit try-on with 7 images, URL param parsing, ASIN extraction

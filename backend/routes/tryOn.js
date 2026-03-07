@@ -79,7 +79,7 @@ const { getProfile } = require("../services/firestore");
 const { validateBase64Image } = require("../middleware/validation");
 
 const VALID_GARMENT_CLASSES = [
-  "UPPER_BODY", "LOWER_BODY", "FULL_BODY", "FOOTWEAR",
+  "UPPER_BODY", "LOWER_BODY", "FULL_BODY", "FOOTWEAR", "ACCESSORY",
   "LONG_SLEEVE_SHIRT", "SHORT_SLEEVE_SHIRT", "NO_SLEEVE_SHIRT",
   "LONG_PANTS", "SHORT_PANTS", "LONG_DRESS", "SHORT_DRESS",
   "FULL_BODY_OUTFIT", "SHOES", "BOOTS"
@@ -199,7 +199,14 @@ router.post("/", optionalAuth, async (req, res, next) => {
       if (!garmentClass && analysisResult.garmentClass) {
         garmentClass = analysisResult.garmentClass;
       }
-      console.log(`\x1b[32m  ✓ STEP 1\x1b[0m \x1b[90m(${step1Result.value.time}s)\x1b[0m — garmentClass: \x1b[1m${analysisResult.garmentClass}\x1b[0m, category: ${analysisResult.category}`);
+      // If AI classified as accessories, set garmentClass to ACCESSORY and pass accessoryType
+      if (analysisResult.category === "accessories" && analysisResult.accessoryType) {
+        garmentClass = "ACCESSORY";
+        // Pass accessoryType as garmentSubClass so buildSmartPrompt can use it
+        if (!outfitInfo) outfitInfo = {};
+        outfitInfo.garmentSubClass = analysisResult.accessoryType.toUpperCase();
+      }
+      console.log(`\x1b[32m  ✓ STEP 1\x1b[0m \x1b[90m(${step1Result.value.time}s)\x1b[0m — garmentClass: \x1b[1m${garmentClass}\x1b[0m, category: ${analysisResult.category}${analysisResult.accessoryType ? ', accessoryType: ' + analysisResult.accessoryType : ''}`);
       debugSteps.push({ step: "1", name: "PRODUCT ANALYSIS", model: "Gemini Classifier", time: step1Result.value.time + "s", result: analysisResult });
     } else {
       console.warn(`\x1b[31m  ✗ STEP 1 FAILED:\x1b[0m ${step1Result.reason?.message}`);
@@ -223,14 +230,17 @@ router.post("/", optionalAuth, async (req, res, next) => {
       debugSteps.push({ step: "2", name: "GARMENT PREPROCESSING", time: "0s", result: { error: step2Result.reason?.message, method: "original" } });
     }
 
-    // Process Step 3 result
+    // Process Step 3 result — preserve garmentSubClass from Step 1 if set (for accessories)
+    const savedSubClass = outfitInfo?.garmentSubClass;
     if (step3Result.status === "fulfilled") {
       outfitInfo = step3Result.value.result;
+      if (savedSubClass) outfitInfo.garmentSubClass = savedSubClass;
       console.log(`\x1b[32m  ✓ STEP 3\x1b[0m \x1b[90m(${step3Result.value.time}s)\x1b[0m — currentType: \x1b[1m${outfitInfo.currentType}\x1b[0m`);
       debugSteps.push({ step: "3", name: "OUTFIT CLASSIFICATION", model: "Gemini Classifier", time: step3Result.value.time + "s", result: outfitInfo });
     } else {
       console.warn(`\x1b[31m  ✗ STEP 3 FAILED:\x1b[0m ${step3Result.reason?.message} — using default`);
       outfitInfo = { currentType: "UPPER_LOWER" };
+      if (savedSubClass) outfitInfo.garmentSubClass = savedSubClass;
       debugSteps.push({ step: "3", name: "OUTFIT CLASSIFICATION", model: "Gemini Classifier", time: "0s", result: { error: step3Result.reason?.message, fallback: outfitInfo } });
     }
 
@@ -239,7 +249,7 @@ router.post("/", optionalAuth, async (req, res, next) => {
     // ═══════════════════════════════════════════════════
     // STEP 4: CONFLICT MATRIX (buildSmartPrompt)
     // ═══════════════════════════════════════════════════
-    const smartPrompt = buildSmartPrompt(garmentClass, outfitInfo, framing);
+    const smartPrompt = buildSmartPrompt(garmentClass, outfitInfo, framing, productTitle);
     const strategy = outfitInfo?.currentType === "FULL_BODY" && (garmentClass === "UPPER_BODY" || garmentClass === "LOWER_BODY") ? "CONFLICT RESOLUTION" : "STANDARD";
     console.log(`\n\x1b[1m\x1b[35m▶ STEP 4: CONFLICT MATRIX [buildSmartPrompt]\x1b[0m`);
     console.log(`\x1b[90m  ℹ Determine try-on strategy and build the context-aware prompt for Gemini\x1b[0m`);

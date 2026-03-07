@@ -93,13 +93,28 @@ async function apiFetch(method, endpoint, data, retry = true) {
   const url = `${backendUrl}${endpoint}`;
   const headers = await buildHeaders();
 
-  const opts = { method, headers };
+  const controller = new AbortController();
+  const timeoutMs = 300000; // 5 minutes — Cloud Run has 600s, give client 5min
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  const opts = { method, headers, signal: controller.signal };
   if (data !== undefined) {
     opts.body = JSON.stringify(data);
   }
 
   console.log(`[bg] fetch: ${method} ${url}`);
-  const response = await fetch(url, opts);
+  let response;
+  try {
+    response = await fetch(url, opts);
+  } catch (networkErr) {
+    clearTimeout(timeoutId);
+    const reason = networkErr.name === "AbortError"
+      ? `Request timed out after ${timeoutMs / 1000}s`
+      : networkErr.message;
+    console.error(`[bg] Network error: ${method} ${endpoint} — ${reason}`);
+    throw new Error(`Network error on ${method} ${endpoint}: ${reason}`);
+  }
+  clearTimeout(timeoutId);
   console.log(`[bg] fetch response: ${method} ${endpoint} → ${response.status}`);
 
   if (response.status === 401 && retry) {
@@ -162,31 +177,27 @@ async function proxyImageFetch(imageUrl) {
 }
 
 async function getStoredPhotos() {
-  const result = await chrome.storage.local.get(["bodyPhoto", "facePhoto", "selectedPoseIndex"]);
+  const result = await chrome.storage.local.get(["bodyPhoto", "selectedPoseIndex", "selectedFaceIndex"]);
   let bodyPhoto = result.bodyPhoto || null;
-  let facePhoto = result.facePhoto || null;
+  let facePhoto = null;
   const selectedPoseIndex = result.selectedPoseIndex ?? 0;
+  const selectedFaceIndex = result.selectedFaceIndex ?? 0;
 
-  // If photos are missing from local storage, fetch from backend (GCS)
-  if (!bodyPhoto || !facePhoto) {
-    try {
-      const allPhotos = await apiGet("/api/profile/photos/all");
-      if (!bodyPhoto && allPhotos.generated && allPhotos.generated[selectedPoseIndex]) {
-        bodyPhoto = allPhotos.generated[selectedPoseIndex];
-        // Cache locally for next time
-        await chrome.storage.local.set({ bodyPhoto });
-      }
-      if (!facePhoto && allPhotos.originals) {
-        // Use last original as face photo (face photos are uploaded last in wizard)
-        const faceImg = allPhotos.originals[allPhotos.originals.length - 1];
-        if (faceImg) {
-          facePhoto = faceImg;
-          await chrome.storage.local.set({ facePhoto });
-        }
-      }
-    } catch (err) {
-      console.warn("[background] Failed to fetch photos from backend:", err.message);
+  // Always fetch face photo fresh based on selectedFaceIndex (indices 3+ in originals)
+  try {
+    const allPhotos = await apiGet("/api/profile/photos/all");
+    if (!bodyPhoto && allPhotos.generated && allPhotos.generated[selectedPoseIndex]) {
+      bodyPhoto = allPhotos.generated[selectedPoseIndex];
+      await chrome.storage.local.set({ bodyPhoto });
     }
+    if (allPhotos.originals) {
+      const facePhotos = allPhotos.originals.slice(3);
+      const idx = Math.min(selectedFaceIndex, facePhotos.length - 1);
+      facePhoto = facePhotos[idx] || allPhotos.originals[allPhotos.originals.length - 1] || null;
+      console.log(`[background] getStoredPhotos: selectedFaceIndex=${selectedFaceIndex}, facePhotos.length=${facePhotos.length}, using idx=${idx}, facePhoto=${facePhoto ? facePhoto.substring(0, 20) + '...' : 'null'}`);
+    }
+  } catch (err) {
+    console.warn("[background] Failed to fetch photos from backend:", err.message);
   }
 
   return { bodyPhoto, facePhoto, selectedPoseIndex };
@@ -254,6 +265,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             faceImage: message.faceImageBase64,
             cosmeticType: message.cosmeticType,
             color: message.color,
+            productImage: message.productImage || null,
           });
           sendResponse({ data: result });
           break;
@@ -331,6 +343,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               query: message.query,
             });
             sendResponse({ data: result });
+          }
+          break;
+        }
+
+        case "COMPARE_SEARCH": {
+          try {
+            const compareResult = await compareAcrossRetailers(message.query);
+            sendResponse({ data: { success: true, comparisons: compareResult } });
+          } catch (err) {
+            console.error("[background] Compare search failed:", err.message);
+            sendResponse({ data: { error: "Compare search failed: " + err.message } });
           }
           break;
         }
@@ -557,8 +580,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ error: `Unknown message type: ${message.type}` });
       }
     } catch (err) {
-      console.error("[GeminiTryOnMe background] Error:", err);
-      sendResponse({ error: err.message });
+      const msgType = message.type || "UNKNOWN";
+      console.error(`[GeminiTryOnMe background] Error handling ${msgType}:`, err.message, err);
+      sendResponse({ error: `${err.message}` });
     }
   })();
 
@@ -767,8 +791,32 @@ function extractAmazonProducts() {
         if (m) rating = m[1];
       }
 
-      // Popularity
+      // Review count (numeric)
       let review_count = "";
+      let review_count_num = 0;
+      const reviewCountEl = item.querySelector('[aria-label*="ratings"], [aria-label*="reviews"]') ||
+                            item.querySelector('a span.a-size-base');
+      if (reviewCountEl) {
+        const rcText = reviewCountEl.textContent.trim().replace(/,/g, '');
+        const rcMatch = rcText.match(/^([\d]+)/);
+        if (rcMatch) review_count_num = parseInt(rcMatch[1], 10);
+      }
+      // Fallback: look for "X ratings" in aria-label
+      if (review_count_num === 0) {
+        const ratingLink = item.querySelector('a[href*="#customerReviews"]');
+        if (ratingLink) {
+          const ariaLabel = ratingLink.getAttribute('aria-label') || '';
+          const countMatch = ariaLabel.match(/([\d,]+)\s*(?:ratings|reviews)/i);
+          if (countMatch) review_count_num = parseInt(countMatch[1].replace(/,/g, ''), 10);
+          if (review_count_num === 0) {
+            const spanText = ratingLink.textContent.trim().replace(/,/g, '');
+            const spanMatch = spanText.match(/^(\d+)/);
+            if (spanMatch) review_count_num = parseInt(spanMatch[1], 10);
+          }
+        }
+      }
+
+      // Popularity
       const fullText = item.textContent;
       const boughtMatch = fullText.match(/([\dK,]+\+?) bought in past month/);
       if (boughtMatch) review_count = boughtMatch[1] + " bought";
@@ -782,7 +830,9 @@ function extractAmazonProducts() {
         title: brand ? brand + " " + title : title,
         price,
         rating,
+        rating_num: parseFloat(rating) || 0,
         review_count,
+        review_count_num,
         image_url,
         product_url,
         _sponsored: isSponsored,
@@ -793,6 +843,226 @@ function extractAmazonProducts() {
   // Sort: organic first, then sponsored
   results.sort((a, b) => (a._sponsored ? 1 : 0) - (b._sponsored ? 1 : 0));
   results.forEach((p) => delete p._sponsored);
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Price Compare: Amazon is ALWAYS the reference
+// 1. Search Amazon → filter 4+ stars, 100+ reviews → up to 5 products
+// 2. Extract: title, image, price, rating, reviews, link from each
+// 3. For each product → search ALL retailers simultaneously
+// 4. Retailers: Walmart, Shein, Temu, Poshmark (via Google Shopping site: filter)
+// ---------------------------------------------------------------------------
+
+const COMPARE_AMAZON_LIMIT = 5;
+const COMPARE_MIN_STARS = 4.0;
+const COMPARE_MIN_REVIEWS = 100;
+
+const COMPARE_RETAILERS = [
+  { name: "Walmart", siteFilter: "site:walmart.com" },
+  { name: "SHEIN", siteFilter: "site:shein.com" },
+  { name: "Temu", siteFilter: "site:temu.com" },
+  { name: "Poshmark", siteFilter: "site:poshmark.com" },
+];
+
+/**
+ * Filter Amazon products by quality criteria.
+ */
+function filterAmazonForCompare(products) {
+  return products
+    .filter(p => p.rating_num >= COMPARE_MIN_STARS && p.review_count_num >= COMPARE_MIN_REVIEWS)
+    .slice(0, COMPARE_AMAZON_LIMIT);
+}
+
+async function compareAcrossRetailers(query) {
+  console.log(`[compare] Starting cross-retailer comparison for: "${query}"`);
+  const startTime = Date.now();
+
+  // Step 1: Search Amazon — always the reference
+  const allAmazon = await clientSideAmazonSearch(query);
+  console.log(`[compare] Amazon returned ${allAmazon.length} products in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+
+  let topAmazon = filterAmazonForCompare(allAmazon);
+  console.log(`[compare] After filtering (${COMPARE_MIN_STARS}+ stars, ${COMPARE_MIN_REVIEWS}+ reviews): ${topAmazon.length} products`);
+
+  if (topAmazon.length === 0) {
+    // Fallback: take top 5 by rating if nothing passes the strict filter
+    topAmazon = allAmazon
+      .filter(p => p.rating_num >= 3.5)
+      .sort((a, b) => b.rating_num - a.rating_num || b.review_count_num - a.review_count_num)
+      .slice(0, COMPARE_AMAZON_LIMIT);
+    if (topAmazon.length === 0) return [];
+    console.log(`[compare] Fallback: using ${topAmazon.length} products with relaxed filter`);
+  }
+
+  // Step 2: For each Amazon product, search ALL retailers simultaneously
+  // Product 1 → [Walmart, Shein, Temu, Poshmark] all at once
+  // Product 2 → [Walmart, Shein, Temu, Poshmark] all at once
+  // ... and all products in parallel too
+  const comparisons = await Promise.all(
+    topAmazon.map(async (amazonProduct, idx) => {
+      const productTitle = amazonProduct.title;
+      console.log(`[compare] [${idx + 1}/${topAmazon.length}] Searching all retailers for: "${productTitle.substring(0, 50)}..."`);
+
+      // Search ALL retailers simultaneously for this product
+      const retailerResults = await Promise.allSettled(
+        COMPARE_RETAILERS.map(retailer =>
+          searchRetailerViaGoogle(productTitle, retailer)
+        )
+      );
+
+      // Collect successful results
+      const alternatives = [];
+      retailerResults.forEach((result, i) => {
+        if (result.status === 'fulfilled' && result.value) {
+          alternatives.push({
+            ...result.value,
+            retailer: COMPARE_RETAILERS[i].name,
+          });
+        }
+      });
+
+      console.log(`[compare] [${idx + 1}] Found ${alternatives.length} alternatives across retailers`);
+
+      return {
+        amazon: {
+          title: amazonProduct.title,
+          price: amazonProduct.price,
+          rating: amazonProduct.rating,
+          review_count: amazonProduct.review_count,
+          review_count_num: amazonProduct.review_count_num,
+          image_url: amazonProduct.image_url,
+          product_url: amazonProduct.product_url,
+          retailer: "Amazon",
+        },
+        alternatives,
+      };
+    })
+  );
+
+  console.log(`[compare] Complete! Total time: ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+  return comparisons;
+}
+
+/**
+ * Search a specific retailer for a product via Google Shopping with site: filter.
+ * Returns the best match or null if not found.
+ */
+async function searchRetailerViaGoogle(productTitle, retailer) {
+  const query = `${productTitle} ${retailer.siteFilter}`;
+  const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=shop`;
+  const tab = await chrome.tabs.create({ url, active: false });
+
+  try {
+    await waitForTabLoad(tab.id);
+    await sleep(2000);
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: extractGoogleShoppingResults,
+    });
+
+    const products = results?.[0]?.result || [];
+    // Return the best match (first result) or null
+    return products.length > 0 ? products[0] : null;
+  } finally {
+    try { await chrome.tabs.remove(tab.id); } catch (e) {}
+  }
+}
+
+/**
+ * Shorten a product title for search.
+ * Used as utility — not in main compare flow (full title is used).
+ */
+function shortenProductName(title) {
+  let short = title.substring(0, 60);
+  const lastSpace = short.lastIndexOf(' ');
+  if (lastSpace > 30) short = short.substring(0, lastSpace);
+  short = short.replace(/\s*[\(\[].*?[\)\]]/g, '').replace(/\s*-\s*Size\s*\w+/gi, '');
+  return short.trim();
+}
+
+/**
+ * Injected into Google Shopping results page to extract the best product match.
+ * Since we use site: filters per retailer, we don't need to filter by retailer here.
+ * Just grab the first valid product card with title, price, image, and link.
+ */
+function extractGoogleShoppingResults() {
+  const results = [];
+
+  // Strategy 1: product cards with shopping links
+  const allLinks = document.querySelectorAll('a[href*="/shopping/product/"], a[href*="url?url="], a[href*="/url?"]');
+  const processedCards = new Set();
+
+  for (const link of allLinks) {
+    let card = link;
+    for (let i = 0; i < 5; i++) {
+      if (card.parentElement) card = card.parentElement;
+    }
+    if (processedCards.has(card)) continue;
+    processedCards.add(card);
+
+    try {
+      // Title
+      let title = '';
+      const h3 = card.querySelector('h3');
+      if (h3) {
+        title = h3.textContent.trim();
+      } else {
+        for (const el of card.querySelectorAll('div, span')) {
+          const t = el.textContent.trim();
+          if (t.length > 10 && t.length < 150 && el.children.length === 0) { title = t; break; }
+        }
+      }
+      if (!title || title.length < 5) continue;
+
+      // Price
+      let price = '';
+      for (const el of card.querySelectorAll('span, div, b')) {
+        const t = el.textContent.trim();
+        if (/^\$[\d,.]+$/.test(t)) { price = t; break; }
+      }
+
+      // Image
+      let image_url = '';
+      const img = card.querySelector('img:not([src*="google"]):not([src*="gstatic"])');
+      if (img) image_url = img.src || img.getAttribute('data-src') || '';
+
+      // Product URL — extract actual destination from Google redirect
+      let product_url = '';
+      const productLink = card.querySelector('a[href*="/shopping/product/"]') || card.querySelector('a[href*="url?url="]') || card.querySelector('a[href^="http"]');
+      if (productLink) {
+        const href = productLink.getAttribute('href') || '';
+        if (href.includes('url?url=')) {
+          const m = href.match(/url\?url=([^&]+)/);
+          product_url = m ? decodeURIComponent(m[1]) : href;
+        } else {
+          product_url = href.startsWith('http') ? href : 'https://www.google.com' + href;
+        }
+      }
+
+      if (title && (price || image_url)) {
+        results.push({ title, price, image_url, product_url });
+      }
+    } catch (e) {}
+  }
+
+  // Strategy 2: data attribute fallback
+  if (results.length === 0) {
+    for (const card of document.querySelectorAll('[data-docid], [data-prid]')) {
+      try {
+        const title = (card.querySelector('h3, [aria-label]')?.textContent || '').trim();
+        let price = '';
+        card.querySelectorAll('span, b').forEach(el => {
+          if (!price && /^\$[\d,.]+$/.test(el.textContent.trim())) price = el.textContent.trim();
+        });
+        const image_url = card.querySelector('img')?.src || '';
+        const product_url = card.querySelector('a')?.href || '';
+        if (title && price) results.push({ title, price, image_url, product_url });
+      } catch (e) {}
+    }
+  }
 
   return results;
 }

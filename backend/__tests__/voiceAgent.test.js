@@ -82,9 +82,9 @@ describe("Voice Agent — System Prompt", () => {
     expect(source).toContain("top, bottom, shoes, necklace, earrings, bracelet");
   });
 
-  test("contains tool protocol requiring user confirmation", () => {
-    expect(source).toContain("TOOL PROTOCOL");
-    expect(source).toContain("confirms");
+  test("contains tool rules requiring explicit user request", () => {
+    expect(source).toContain("NEVER ACT WITHOUT EXPLICIT USER REQUEST");
+    expect(source).toContain("OUTFIT BUILDER — CONFIRMATION FLOW");
   });
 
   test("mentions key tool names in prompt or descriptions", () => {

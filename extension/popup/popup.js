@@ -1154,21 +1154,34 @@ async function handleWizard2Next() {
 
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
 
-    // Update progress UI with results
+    // Reveal pose images one by one with staggered delay, then show success
     if (result.generatedPhotos) {
+      const revealPose = (i) => new Promise(resolve => {
+        setTimeout(() => {
+          const step = document.getElementById(`genStep${i}`);
+          step.classList.remove('gen-step-active');
+          if (result.generatedPhotos[i]) {
+            step.classList.add('gen-step-done');
+            step.querySelector('.gen-step-icon').innerHTML = '&#10003;';
+            const img = document.getElementById(`genImg${i}`);
+            img.src = `data:image/jpeg;base64,${result.generatedPhotos[i]}`;
+            img.hidden = false;
+          } else {
+            step.classList.add('gen-step-error');
+            step.querySelector('.gen-step-icon').innerHTML = '&#10007;';
+          }
+          // Mark next step as active while it "loads"
+          if (i < 2 && result.generatedPhotos[i + 1]) {
+            const nextStep = document.getElementById(`genStep${i + 1}`);
+            nextStep.classList.add('gen-step-active');
+            nextStep.querySelector('.gen-step-icon').innerHTML = '&#8987;';
+          }
+          resolve();
+        }, i === 0 ? 0 : 600); // first one instant, others 600ms apart
+      });
+
       for (let i = 0; i < 3; i++) {
-        const step = document.getElementById(`genStep${i}`);
-        step.classList.remove('gen-step-active');
-        if (result.generatedPhotos[i]) {
-          step.classList.add('gen-step-done');
-          step.querySelector('.gen-step-icon').innerHTML = '&#10003;';
-          const img = document.getElementById(`genImg${i}`);
-          img.src = `data:image/jpeg;base64,${result.generatedPhotos[i]}`;
-          img.hidden = false;
-        } else {
-          step.classList.add('gen-step-error');
-          step.querySelector('.gen-step-icon').innerHTML = '&#10007;';
-        }
+        await revealPose(i);
       }
       document.getElementById('genStep2').querySelector('.gen-step-time').textContent = `${totalTime}s total`;
     }
@@ -1182,7 +1195,7 @@ async function handleWizard2Next() {
       });
     }
 
-    // Show success message, confetti, and complete button
+    // Show success message, confetti, and complete button AFTER all poses are visible
     const successEl2 = document.getElementById('genSuccess');
     if (successEl2) successEl2.hidden = false;
     document.getElementById('wizard3Done').hidden = false;
@@ -1331,6 +1344,134 @@ async function loadCosmeticsFaceSelector() {
 // Smart Search
 // ---------------------------------------------------------------------------
 
+async function handleCompareSearch() {
+  const input = document.getElementById('compareSearchInput');
+  const btn = document.getElementById('compareSearchBtn');
+  const errorEl = document.getElementById('compareSearchError');
+  const resultsEl = document.getElementById('compareResults');
+  const query = input.value.trim();
+
+  errorEl.textContent = '';
+  resultsEl.innerHTML = '';
+
+  if (!query) {
+    errorEl.textContent = 'Please enter a search query';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Classifying...';
+  resultsEl.innerHTML = '<p class="compare-loading">Analyzing product category...</p>';
+
+  // Step 1: Classify the query via AI to determine if size/sex should be appended
+  let enrichedQuery = query;
+  try {
+    const classification = await sendMsg({
+      type: 'API_CALL',
+      endpoint: '/api/classify-query',
+      method: 'POST',
+      data: { query },
+    });
+
+    if (classification && !classification.error) {
+      const sizeParts = [];
+
+      // Append sex if needed and available
+      if (classification.needsSex && cachedProfile?.sex) {
+        const sexLabel = cachedProfile.sex === 'male' ? 'for men' : 'for women';
+        // Only append if not already in query
+        if (!query.toLowerCase().includes('for men') && !query.toLowerCase().includes('for women') &&
+            !query.toLowerCase().includes("men's") && !query.toLowerCase().includes("women's")) {
+          sizeParts.push(sexLabel);
+        }
+      }
+
+      // Append clothing size if needed and available
+      if (classification.needsClothingSize && cachedProfile?.clothesSize) {
+        sizeParts.push(`size ${cachedProfile.clothesSize}`);
+      }
+
+      // Append shoe size if needed and available
+      if (classification.needsShoeSize && cachedProfile?.shoesSize) {
+        sizeParts.push(`size ${cachedProfile.shoesSize}`);
+      }
+
+      if (sizeParts.length > 0) {
+        enrichedQuery = `${query} ${sizeParts.join(' ')}`;
+        console.log(`[compare] Enriched query: "${enrichedQuery}" (category: ${classification.category})`);
+      }
+    }
+  } catch (classifyErr) {
+    console.warn('[compare] Classification failed, using original query:', classifyErr.message);
+  }
+
+  btn.textContent = 'Searching...';
+  resultsEl.innerHTML = '<p class="compare-loading">Searching across retailers...</p>';
+
+  try {
+    const result = await sendMsg({ type: 'COMPARE_SEARCH', query: enrichedQuery });
+    if (!result || result.error) {
+      errorEl.textContent = result?.error || 'Compare search failed';
+      resultsEl.innerHTML = '';
+      return;
+    }
+
+    const comparisons = result.comparisons || [];
+    if (comparisons.length === 0) {
+      resultsEl.innerHTML = '<p class="compare-empty">No results found.</p>';
+      return;
+    }
+
+    const esc = (s) => (s || '').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+    resultsEl.innerHTML = comparisons.map((comp, idx) => {
+      const a = comp.amazon;
+      const alts = comp.alternatives || [];
+
+      const amazonCard = `
+        <a href="${esc(a.product_url)}" class="compare-item compare-item--amazon" target="_blank" rel="noopener">
+          <img class="compare-item-img" src="${esc(a.image_url)}" alt="" onerror="this.style.display='none'" />
+          <div class="compare-item-info">
+            <p class="compare-item-title">${esc(a.title).substring(0, 80)}</p>
+            <div class="compare-item-meta">
+              <span class="compare-item-price">${esc(a.price) || 'N/A'}</span>
+              <span class="compare-item-rating">${a.rating ? a.rating + ' ★' : ''}</span>
+              <span class="compare-item-retailer">Amazon</span>
+            </div>
+          </div>
+        </a>`;
+
+      const altCards = alts.length > 0
+        ? alts.map(alt => `
+          <a href="${esc(alt.product_url)}" class="compare-item compare-item--alt" target="_blank" rel="noopener">
+            <img class="compare-item-img compare-item-img--small" src="${esc(alt.image_url)}" alt="" onerror="this.style.display='none'" />
+            <div class="compare-item-info">
+              <p class="compare-item-title">${esc(alt.title).substring(0, 60)}</p>
+              <div class="compare-item-meta">
+                <span class="compare-item-price">${esc(alt.price) || 'N/A'}</span>
+                <span class="compare-item-retailer">${esc(alt.retailer) || 'Other'}</span>
+              </div>
+            </div>
+          </a>`).join('')
+        : '<p class="compare-no-alts">No alternatives found</p>';
+
+      return `
+        <div class="compare-group">
+          <div class="compare-group-header">#${idx + 1}</div>
+          ${amazonCard}
+          <div class="compare-alts-label">Also available at:</div>
+          ${altCards}
+        </div>`;
+    }).join('');
+  } catch (err) {
+    errorEl.textContent = 'Search failed: ' + err.message;
+    resultsEl.innerHTML = '';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Compare';
+  }
+}
+
 async function handleSmartSearch() {
   const input = document.getElementById('smartSearchInput');
   const btn = document.getElementById('smartSearchBtn');
@@ -1405,6 +1546,7 @@ async function init() {
       document.getElementById('panelSmartSearch').classList.toggle('hidden', mode !== 'single');
       document.getElementById('panelOutfitBuilder').classList.toggle('hidden', mode !== 'outfit');
       document.getElementById('panelCosmetics').classList.toggle('hidden', mode !== 'cosmetics');
+      document.getElementById('panelCompare').classList.toggle('hidden', mode !== 'compare');
       if (mode === 'cosmetics') loadCosmeticsFaceSelector();
     });
   });
@@ -1412,6 +1554,12 @@ async function init() {
   document.getElementById('smartSearchBtn').addEventListener('click', handleSmartSearch);
   document.getElementById('smartSearchInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') handleSmartSearch();
+  });
+
+  // Compare — search Google Shopping for price comparison
+  document.getElementById('compareSearchBtn').addEventListener('click', handleCompareSearch);
+  document.getElementById('compareSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleCompareSearch();
   });
 
   // Outfit Builder — open Virtual Wardrobe in a new tab
@@ -1586,6 +1734,14 @@ document.addEventListener('DOMContentLoaded', init);
   let recentTranscripts = []; // last few transcripts for extracting accessory mentions
 
   let pendingToolCall = false; // Audio gate — block audio during pending tool calls
+  let sessionStartTime = 0; // Timestamp when session started — used to ignore early interruptions
+  let isModelSpeaking = false; // True while model is outputting audio
+  let modelSpeakingStartTime = 0; // When model started speaking (for AEC grace period)
+  let muteNextModelTurn = false; // Suppress model's duplicate announcement after async tool response
+  let loudChunkCount = 0; // Consecutive loud audio chunks (for barge-in detection)
+  const ECHO_GRACE_MS = 1500; // Let browser AEC stabilize before allowing barge-in
+  const BARGE_IN_RMS = 5000; // ~15% of max int16 — filters speaker echo while allowing real speech
+  const BARGE_IN_CHUNKS = 5; // Need 5 consecutive loud chunks to confirm real barge-in
   let lastTryOnSource = null; // "outfit" or "search" — tracks which mode did the last try-on
 
   // Get WebSocket URL for the Vertex AI voice proxy on our backend
@@ -1673,6 +1829,12 @@ document.addEventListener('DOMContentLoaded', init);
       ws.onmessage = async (event) => {
         // Binary message = raw PCM audio from Gemini
         if (event.data instanceof ArrayBuffer) {
+          if (muteNextModelTurn) return; // Suppress duplicate announcement after async tool
+          if (!isModelSpeaking) {
+            isModelSpeaking = true;
+            modelSpeakingStartTime = Date.now();
+            loudChunkCount = 0;
+          }
           playAudioChunkBinary(event.data);
           return;
         }
@@ -1729,6 +1891,10 @@ document.addEventListener('DOMContentLoaded', init);
     // Setup complete
     if (msg.setupComplete) {
       console.log('[Giselle] Session ready (direct)');
+      sessionStartTime = Date.now();
+      muteNextModelTurn = false; // Reset on new session
+      isModelSpeaking = false;
+      loudChunkCount = 0;
       if (onSetupComplete) onSetupComplete();
       return;
     }
@@ -1738,12 +1904,17 @@ document.addEventListener('DOMContentLoaded', init);
 
     // Turn complete
     if (msg.serverContent?.turnComplete) {
+      isModelSpeaking = false;
+      loudChunkCount = 0;
+      muteNextModelTurn = false; // Allow speech on subsequent turns
       currentOutputMsg = null;
       currentInputMsg = null;
     }
 
     // Barge-in / interrupted
     if (msg.serverContent?.interrupted) {
+      isModelSpeaking = false;
+      loudChunkCount = 0;
       stopPlayback();
       pendingToolCall = false; // Ungate audio so user can speak after interruption
     }
@@ -1754,7 +1925,7 @@ document.addEventListener('DOMContentLoaded', init);
     }
 
     // Output transcription (what the model said)
-    if (msg.serverContent?.outputTranscription?.text) {
+    if (msg.serverContent?.outputTranscription?.text && !muteNextModelTurn) {
       currentInputMsg = null;
       const text = msg.serverContent.outputTranscription.text;
       if (text) {
@@ -1769,9 +1940,22 @@ document.addEventListener('DOMContentLoaded', init);
 
     // Tool calls — gate audio
     if (msg.toolCall?.functionCalls) {
-      pendingToolCall = true;
-      console.log('[Giselle] 🔧 Tool calls received (audio gated):', msg.toolCall.functionCalls.map(c => `${c.name}(${JSON.stringify(c.args || {}).substring(0, 100)})`).join(', '));
-      handleToolCalls(msg.toolCall.functionCalls);
+      if (muteNextModelTurn) {
+        // Model is re-calling a tool after receiving tool response — skip to prevent duplicates
+        console.warn('[Giselle] ⚠️ Ignoring duplicate tool calls during muted turn:', msg.toolCall.functionCalls.map(c => c.name).join(', '));
+        // Send empty responses so Gemini doesn't hang waiting
+        for (const call of msg.toolCall.functionCalls) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              toolResponse: { functionResponses: [{ id: call.id, name: call.name, response: { result: 'Already in progress.' } }] },
+            }));
+          }
+        }
+      } else {
+        pendingToolCall = true;
+        console.log('[Giselle] 🔧 Tool calls received (audio gated):', msg.toolCall.functionCalls.map(c => `${c.name}(${JSON.stringify(c.args || {}).substring(0, 100)})`).join(', '));
+        handleToolCalls(msg.toolCall.functionCalls);
+      }
     }
 
     // Tool call cancellation — ungate audio
@@ -1842,6 +2026,16 @@ document.addEventListener('DOMContentLoaded', init);
         console.log('[Giselle] Sent outfit items context to voice session');
       }
     }
+    // Notify Gemini when async operations complete so it knows the user can see the result
+    if (msg.type === 'TRYON_COMPLETE') {
+      tryOnInFlight = false;
+      sendGeminiText('[System: The try-on result is now visible on the user\'s screen. Do NOT call any tools. Do NOT ask questions. Wait silently for the user to speak first.]');
+      console.log('[Giselle] Notified Gemini: try-on complete (tryOnInFlight cleared)');
+    }
+    if (msg.type === 'VIDEO_COMPLETE') {
+      sendGeminiText('[System: The video animation is now playing on the user\'s screen. Do NOT call any tools — especially do NOT call save_video. Do NOT ask questions. Wait silently for the user to speak first.]');
+      console.log('[Giselle] Notified Gemini: video complete');
+    }
   });
 
   // handleServerMessage removed — now using handleGeminiMessage for direct connection
@@ -1899,26 +2093,51 @@ document.addEventListener('DOMContentLoaded', init);
       workletNode = new AudioWorkletNode(captureContext, 'pcm-capture-processor');
 
       // Send PCM chunks to backend
-      // Delay audio sending by 3s to let AEC (echo cancellation) calibrate —
-      // prevents Gemini from hearing its own greeting and barging in on itself
-      const audioSendStartTime = Date.now() + 3000;
+      // When model is silent: send all audio freely (automatic VAD handles it)
+      // When model is speaking: energy-threshold gating allows real barge-in but blocks echo
       let audioChunkCount = 0;
       let maxAudioLevel = 0;
       workletNode.port.onmessage = (e) => {
-        if (ws && ws.readyState === WebSocket.OPEN && !pendingToolCall && Date.now() >= audioSendStartTime) {
-          const int16Array = new Int16Array(e.data);
-          // Track audio levels for debugging
-          for (let i = 0; i < int16Array.length; i++) {
-            const absVal = Math.abs(int16Array[i]);
-            if (absVal > maxAudioLevel) maxAudioLevel = absVal;
-          }
-          audioChunkCount++;
-          if (audioChunkCount % 100 === 0) {
-            console.log(`[Giselle] 🎙️ Audio: ${audioChunkCount} chunks sent, peak level: ${maxAudioLevel} / 32768 (${(maxAudioLevel / 32768 * 100).toFixed(1)}%), sampleRate: ${captureContext.sampleRate}`);
-            maxAudioLevel = 0;
-          }
-          // Send raw PCM binary (no base64 encoding, no JSON wrapper)
+        if (!ws || ws.readyState !== WebSocket.OPEN || pendingToolCall) return;
+
+        const int16Array = new Int16Array(e.data);
+
+        // Track audio levels for debugging
+        for (let i = 0; i < int16Array.length; i++) {
+          const absVal = Math.abs(int16Array[i]);
+          if (absVal > maxAudioLevel) maxAudioLevel = absVal;
+        }
+        audioChunkCount++;
+        if (audioChunkCount % 100 === 0) {
+          console.log(`[Giselle] 🎙️ Audio: ${audioChunkCount} chunks sent, peak level: ${maxAudioLevel} / 32768 (${(maxAudioLevel / 32768 * 100).toFixed(1)}%), modelSpeaking: ${isModelSpeaking}, sampleRate: ${captureContext.sampleRate}`);
+          maxAudioLevel = 0;
+        }
+
+        // Model is silent — send all audio freely
+        if (!isModelSpeaking) {
           ws.send(int16Array.buffer);
+          return;
+        }
+
+        // Model IS speaking — use energy-based gating for barge-in
+        // Grace period: let browser AEC calibrate before allowing any audio through
+        if (Date.now() - modelSpeakingStartTime < ECHO_GRACE_MS) return;
+
+        // Calculate RMS energy of this chunk
+        let sumSquares = 0;
+        for (let i = 0; i < int16Array.length; i++) {
+          sumSquares += int16Array[i] * int16Array[i];
+        }
+        const rms = Math.sqrt(sumSquares / int16Array.length);
+
+        if (rms > BARGE_IN_RMS) {
+          loudChunkCount++;
+          if (loudChunkCount >= BARGE_IN_CHUNKS) {
+            // Real speech detected — send audio for barge-in
+            ws.send(int16Array.buffer);
+          }
+        } else {
+          loudChunkCount = 0;
         }
       };
 
@@ -2100,6 +2319,12 @@ document.addEventListener('DOMContentLoaded', init);
   let outfitConfirmedNoAccessories = false;
   let pendingOutfitData = null;
 
+  // Track last executed tool call to prevent loops
+  let lastToolCallKey = null;
+  let lastToolCallTime = 0;
+  const TOOL_DEDUP_WINDOW_MS = 5000; // ignore same tool+args within 5 seconds
+  let tryOnInFlight = false; // true while a VOICE_SELECT_SEARCH_ITEM try-on is in progress
+
   function handleToolCalls(functionCalls) {
     // Helper to send a single tool response back to Gemini (native format)
     function sendToolResp(callId, callName, result) {
@@ -2110,7 +2335,7 @@ document.addEventListener('DOMContentLoaded', init);
           },
         }));
         pendingToolCall = false; // Ungate audio after tool response
-        console.log(`[Giselle] Tool response sent for ${callName} — audio ungated`);
+        console.log(`[Giselle] ✅ Tool response sent for ${callName} — audio ungated, result: ${typeof result === 'string' ? result.substring(0, 120) : result}`);
       }
     }
 
@@ -2144,6 +2369,19 @@ document.addEventListener('DOMContentLoaded', init);
     for (const call of functionCalls) {
       const data = call.args || {};
 
+      // Deduplication guard — prevent the same tool+args from executing in a loop
+      const toolKey = `${call.name}:${JSON.stringify(data)}`;
+      const now = Date.now();
+      if (toolKey === lastToolCallKey && (now - lastToolCallTime) < TOOL_DEDUP_WINDOW_MS) {
+        console.warn(`[Giselle] 🔁 BLOCKED duplicate tool call: ${call.name}(${JSON.stringify(data)}) — same call ${now - lastToolCallTime}ms ago`);
+        sendToolResp(call.id, call.name, 'This action was already executed moments ago. Do NOT repeat it. Wait for the user to speak.');
+        continue;
+      }
+      lastToolCallKey = toolKey;
+      lastToolCallTime = now;
+
+      console.log(`[Giselle] 🔧 Executing tool: ${call.name}(${JSON.stringify(data)})`);
+
       switch (call.name) {
         case 'search_product': {
           if (data.query) {
@@ -2153,7 +2391,8 @@ document.addEventListener('DOMContentLoaded', init);
               document.getElementById('smartSearchBtn')?.click();
             }
           }
-          sendToolResp(call.id, call.name, 'Search initiated');
+          sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that results are ready.');
+          muteNextModelTurn = true;
           continue;
         }
         case 'build_outfit': {
@@ -2202,7 +2441,8 @@ document.addEventListener('DOMContentLoaded', init);
             }
             document.getElementById('outfitBuildBtn')?.click();
           }, 300);
-          sendToolResp(call.id, call.name, 'Outfit builder started with items');
+          sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that items are ready.');
+          muteNextModelTurn = true;
           continue;
         }
         case 'add_to_cart': {
@@ -2230,8 +2470,15 @@ document.addEventListener('DOMContentLoaded', init);
           }
 
           if (itemNum) {
+            // Block at the source — don't send VOICE_SELECT_SEARCH_ITEM if one is already in flight
+            if (tryOnInFlight) {
+              console.warn(`[Giselle] ⚠️ try_on blocked — try-on already in flight`);
+              sendToolResp(call.id, call.name, 'A try-on is already in progress. Wait for it to finish before trying on another item.');
+              continue;
+            }
+            tryOnInFlight = true;
+            muteNextModelTurn = true; // Set synchronously to block any immediate follow-up tool calls
             lastTryOnSource = 'search';
-            // Delegate to the same message-passing path as select_search_item
             addMessage('bot', `Trying on item ${itemNum} from the search results!`);
             chrome.runtime.sendMessage({
               type: 'VOICE_SELECT_SEARCH_ITEM',
@@ -2239,11 +2486,16 @@ document.addEventListener('DOMContentLoaded', init);
             }, (resp) => {
               const result = resp?.data || resp;
               if (result?.status === 'not_found') {
+                tryOnInFlight = false;
+                muteNextModelTurn = false;
                 sendToolResp(call.id, call.name, `Item ${itemNum} is not available — search results have not finished loading yet. Tell the user to wait for results to load.`);
               } else if (result?.status === 'no_tab') {
+                tryOnInFlight = false;
+                muteNextModelTurn = false;
                 sendToolResp(call.id, call.name, 'The search results page is not open yet. Wait for the search to complete.');
               } else {
-                sendToolResp(call.id, call.name, `Try-on started for item ${itemNum}. The user will see the result shortly.`);
+                sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the result is visible.');
+                // tryOnInFlight cleared when TRYON_COMPLETE arrives
               }
             });
             continue; // async
@@ -2258,7 +2510,8 @@ document.addEventListener('DOMContentLoaded', init);
               document.getElementById('smartSearchBtn')?.click();
             }
           }
-          sendToolResp(call.id, call.name, 'Try-on search initiated');
+          sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the result is visible.');
+          muteNextModelTurn = true;
           continue;
         }
         case 'show_favorites': {
@@ -2272,7 +2525,8 @@ document.addEventListener('DOMContentLoaded', init);
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to save. Try on an item first.');
             } else {
-              sendToolResp(call.id, call.name, 'Saved to favorites successfully!');
+              sendToolResp(call.id, call.name, 'Saved to favorites.');
+              muteNextModelTurn = true;
             }
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No try-on result to save. Try on an item first.');
@@ -2285,7 +2539,8 @@ document.addEventListener('DOMContentLoaded', init);
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to animate. Try on an item first.');
             } else {
-              sendToolResp(call.id, call.name, 'Animation started! The video is being generated — this takes about 30-60 seconds.');
+              sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the video is ready.');
+              muteNextModelTurn = true;
             }
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No try-on result to animate. Try on an item first.');
@@ -2295,7 +2550,8 @@ document.addEventListener('DOMContentLoaded', init);
         case 'save_video': {
           // Send message to content script to save the current video
           sendMsg({ type: 'SAVE_VIDEO', source: lastTryOnSource || 'search' }).then((result) => {
-            sendToolResp(call.id, call.name, result?.success ? 'Video saved' : 'Failed to save video. Generate a video first.');
+            sendToolResp(call.id, call.name, result?.success ? 'Video saved.' : 'Failed to save video. Generate a video first.');
+            muteNextModelTurn = true;
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No video to save. Generate a video first.');
           });
@@ -2487,6 +2743,14 @@ document.addEventListener('DOMContentLoaded', init);
             sendToolResp(call.id, call.name, 'Invalid item number.');
             continue;
           }
+          // Block at the source — don't send if a try-on is already in flight
+          if (tryOnInFlight) {
+            console.warn(`[Giselle] ⚠️ select_search_item blocked — try-on already in flight`);
+            sendToolResp(call.id, call.name, 'A try-on is already in progress. Wait for it to finish before selecting another item.');
+            continue;
+          }
+          tryOnInFlight = true;
+          muteNextModelTurn = true; // Set synchronously to block any immediate follow-up tool calls
           addMessage('bot', `Selecting item #${itemNum} from search results...`);
           chrome.runtime.sendMessage({
             type: 'VOICE_SELECT_SEARCH_ITEM',
@@ -2494,11 +2758,16 @@ document.addEventListener('DOMContentLoaded', init);
           }, (resp) => {
             const result = resp?.data || resp;
             if (result?.status === 'not_found') {
+              tryOnInFlight = false;
+              muteNextModelTurn = false;
               sendToolResp(call.id, call.name, `Item #${itemNum} is not available — search results have not finished loading yet. Tell the user to wait a moment for results to load before selecting an item.`);
             } else if (result?.status === 'no_tab') {
+              tryOnInFlight = false;
+              muteNextModelTurn = false;
               sendToolResp(call.id, call.name, 'The search results page is not open yet. Wait for the search to complete before selecting items.');
             } else {
-              sendToolResp(call.id, call.name, `Selected item #${itemNum} and started try-on.`);
+              sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the result is visible.');
+              // tryOnInFlight cleared when TRYON_COMPLETE arrives
             }
           });
           continue; // async
@@ -2509,7 +2778,8 @@ document.addEventListener('DOMContentLoaded', init);
           chrome.runtime.sendMessage({ type: 'VOICE_TRY_ON_OUTFIT' }, (resp) => {
             const result = resp?.data || resp;
             if (result?.status === 'ok') {
-              sendToolResp(call.id, call.name, 'Outfit try-on started! The user will see themselves wearing all the selected items. This takes about 15-30 seconds to generate.');
+              sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the result is visible.');
+          muteNextModelTurn = true;
             } else {
               sendToolResp(call.id, call.name, result?.error || 'Could not start try-on — make sure at least a top and bottom are selected in the outfit builder.');
             }

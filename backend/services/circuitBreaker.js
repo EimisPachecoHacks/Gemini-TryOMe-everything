@@ -38,6 +38,19 @@ function getCircuit(name) {
  * @returns {Promise<*>} — result of fn()
  * @throws {Error} — if circuit is open, throws "Service unavailable" instead of calling fn
  */
+/**
+ * Check if an error is a 429 Too Many Requests error.
+ */
+function is429(err) {
+  if (err?.status === 429 || err?.statusCode === 429) return true;
+  if (err?.code === 429) return true;
+  const msg = (err?.message || "").toLowerCase();
+  return msg.includes("429") || msg.includes("too many requests") || msg.includes("resource exhausted") || msg.includes("rate limit");
+}
+
+const RETRY_429_MAX = 3;
+const RETRY_429_BASE_DELAY_MS = 2000; // 2s, 4s, 8s exponential backoff
+
 async function withCircuitBreaker(name, fn) {
   const circuit = getCircuit(name);
 
@@ -55,33 +68,54 @@ async function withCircuitBreaker(name, fn) {
     console.log(`[circuitBreaker] ${name}: OPEN → HALF_OPEN (probe request allowed)`);
   }
 
-  try {
-    const result = await fn();
+  // Attempt with 429 retry (up to 3 retries with exponential backoff)
+  let lastErr;
+  for (let attempt = 0; attempt <= RETRY_429_MAX; attempt++) {
+    try {
+      const result = await fn();
 
-    // Success → reset circuit
-    if (circuit.state !== STATE.CLOSED) {
-      console.log(`[circuitBreaker] ${name}: ${circuit.state} → CLOSED (success)`);
+      // Success → reset circuit
+      if (circuit.state !== STATE.CLOSED) {
+        console.log(`[circuitBreaker] ${name}: ${circuit.state} → CLOSED (success)`);
+      }
+      circuit.state = STATE.CLOSED;
+      circuit.failures = 0;
+      return result;
+    } catch (err) {
+      lastErr = err;
+
+      // 429 retry — only retry rate limit errors, not other failures
+      if (is429(err) && attempt < RETRY_429_MAX) {
+        const delay = RETRY_429_BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(`[circuitBreaker] ${name}: 429 rate limited (attempt ${attempt + 1}/${RETRY_429_MAX + 1}), retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // Non-429 error or exhausted retries — record failure
+      circuit.failures++;
+      circuit.lastFailureTime = Date.now();
+
+      if (is429(err) && attempt >= RETRY_429_MAX) {
+        console.error(`[circuitBreaker] ${name}: 429 rate limited — exhausted all ${RETRY_429_MAX} retries`);
+      }
+
+      // If we were probing (HALF_OPEN) and it failed → back to OPEN
+      if (circuit.state === STATE.HALF_OPEN) {
+        circuit.state = STATE.OPEN;
+        console.warn(`[circuitBreaker] ${name}: HALF_OPEN → OPEN (probe failed: ${err.message})`);
+      } else if (circuit.failures >= THRESHOLD) {
+        circuit.state = STATE.OPEN;
+        console.warn(
+          `[circuitBreaker] ${name}: CLOSED → OPEN (${circuit.failures} consecutive failures)`
+        );
+      }
+
+      throw err;
     }
-    circuit.state = STATE.CLOSED;
-    circuit.failures = 0;
-    return result;
-  } catch (err) {
-    circuit.failures++;
-    circuit.lastFailureTime = Date.now();
-
-    // If we were probing (HALF_OPEN) and it failed → back to OPEN
-    if (circuit.state === STATE.HALF_OPEN) {
-      circuit.state = STATE.OPEN;
-      console.warn(`[circuitBreaker] ${name}: HALF_OPEN → OPEN (probe failed: ${err.message})`);
-    } else if (circuit.failures >= THRESHOLD) {
-      circuit.state = STATE.OPEN;
-      console.warn(
-        `[circuitBreaker] ${name}: CLOSED → OPEN (${circuit.failures} consecutive failures)`
-      );
-    }
-
-    throw err; // Re-throw so caller still sees the original error
   }
+
+  throw lastErr;
 }
 
 /**

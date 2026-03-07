@@ -11,6 +11,7 @@
 
 const express = require("express");
 const { GoogleGenAI } = require("@google/genai");
+const { withCircuitBreaker } = require("../services/circuitBreaker");
 
 const router = express.Router();
 
@@ -79,16 +80,15 @@ router.post("/", async (req, res, next) => {
 
       console.log(`[recommend] OUTFIT MODE: ${totalItems} items across ${Object.keys(outfitItems).filter(k => outfitItems[k]?.length > 0).length} categories, userPhoto: ${!!userPhoto}, screenshot: ${!!screenshot}, user: ${sex} size ${size}`);
 
-      const response = await ai.models.generateContent({
+      const response = await withCircuitBreaker("gemini", () => ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts }],
         config: {
           systemInstruction: "You are an expert personal stylist AI specializing in building complete outfits. You analyze a person's photo and product selections to recommend the best combination of items that work together as a cohesive outfit. You consider body type, skin tone, color theory, style consistency, and accessory coordination. Your recommendations are specific to the person — never generic.",
-          maxOutputTokens: 4096,
           temperature: 0.3,
           thinkingConfig: { thinkingBudget: 0 },
         },
-      });
+      }));
 
       const responseText = response.text || "";
 
@@ -124,16 +124,15 @@ router.post("/", async (req, res, next) => {
 
       console.log(`[recommend] SEARCH MODE: ${(products || []).length} products, userPhoto: ${!!userPhoto}, user: ${sex} size ${size}`);
 
-      const response = await ai.models.generateContent({
+      const response = await withCircuitBreaker("gemini", () => ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts }],
         config: {
           systemInstruction: "You are an expert personal stylist AI. You analyze a person's photo and product images to give honest, personalized fashion recommendations. You consider body type, skin tone, face shape, current style, and color theory. Your recommendations are specific to the person — never generic.",
-          maxOutputTokens: 2048,
           temperature: 0.3,
           thinkingConfig: { thinkingBudget: 0 },
         },
-      });
+      }));
 
       const responseText = response.text || "";
 

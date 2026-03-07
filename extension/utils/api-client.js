@@ -12,13 +12,15 @@ class ApiClient {
   // ---------------------------------------------------------------------------
 
   static _sendMessage(message) {
+    const msgType = message.type || "UNKNOWN";
+    const endpoint = message.endpoint || "";
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(message, (response) => {
         if (chrome.runtime.lastError) {
-          return reject(new Error(chrome.runtime.lastError.message));
+          return reject(new Error(`[${msgType}${endpoint ? " " + endpoint : ""}] Extension error: ${chrome.runtime.lastError.message}`));
         }
         if (response && response.error) {
-          return reject(new Error(response.error));
+          return reject(new Error(`[${msgType}${endpoint ? " " + endpoint : ""}] ${response.error}`));
         }
         resolve(response.data);
       });
@@ -51,12 +53,13 @@ class ApiClient {
     });
   }
 
-  static tryOnCosmetics(faceImageBase64, cosmeticType, color) {
+  static tryOnCosmetics(faceImageBase64, cosmeticType, color, productImage) {
     return ApiClient._sendMessage({
       type: "TRY_ON_COSMETICS",
       faceImageBase64,
       cosmeticType,
       color,
+      productImage,
     });
   }
 
