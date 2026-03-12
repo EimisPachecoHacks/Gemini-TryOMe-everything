@@ -896,33 +896,16 @@ async function compareAcrossRetailers(query) {
     console.log(`[compare] Fallback: using ${topAmazon.length} products with relaxed filter`);
   }
 
-  // Step 2: For each Amazon product, search ALL retailers simultaneously
-  // Product 1 → [Walmart, Shein, Temu, Poshmark] all at once
-  // Product 2 → [Walmart, Shein, Temu, Poshmark] all at once
-  // ... and all products in parallel too
+  // Step 2: For each Amazon product, do ONE Google Shopping search (no site: filter)
+  // and extract retailer names from the results. This finds more alternatives than
+  // separate site:-filtered searches because Google returns cross-retailer results.
   const comparisons = await Promise.all(
     topAmazon.map(async (amazonProduct, idx) => {
       const productTitle = amazonProduct.title;
-      console.log(`[compare] [${idx + 1}/${topAmazon.length}] Searching all retailers for: "${productTitle.substring(0, 50)}..."`);
+      console.log(`[compare] [${idx + 1}/${topAmazon.length}] Searching Google Shopping for: "${productTitle.substring(0, 60)}..."`);
 
-      // Search ALL retailers simultaneously for this product
-      const retailerResults = await Promise.allSettled(
-        COMPARE_RETAILERS.map(retailer =>
-          searchRetailerViaGoogle(productTitle, retailer)
-        )
-      );
-
-      // Collect successful results
-      const alternatives = [];
-      retailerResults.forEach((result, i) => {
-        if (result.status === 'fulfilled' && result.value) {
-          alternatives.push({
-            ...result.value,
-            retailer: COMPARE_RETAILERS[i].name,
-          });
-        }
-      });
-
+      // Single search with full product title — no site: filter
+      const alternatives = await searchGoogleShoppingAll(productTitle);
       console.log(`[compare] [${idx + 1}] Found ${alternatives.length} alternatives across retailers`);
 
       return {
@@ -946,17 +929,18 @@ async function compareAcrossRetailers(query) {
 }
 
 /**
- * Search a specific retailer for a product via Google Shopping with site: filter.
- * Returns the best match or null if not found.
+ * Search Google Shopping for a product (no site: filter) and return all
+ * non-Amazon alternatives with retailer names extracted from the results.
+ * Uses ONE tab instead of 4 separate site:-filtered searches.
  */
-async function searchRetailerViaGoogle(productTitle, retailer) {
-  const query = `${productTitle} ${retailer.siteFilter}`;
-  const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=shop`;
+async function searchGoogleShoppingAll(productTitle) {
+  const url = `https://www.google.com/search?q=${encodeURIComponent(productTitle)}&tbm=shop`;
+  console.log(`[compare] Opening Google Shopping: ${url.substring(0, 100)}...`);
   const tab = await chrome.tabs.create({ url, active: false });
 
   try {
     await waitForTabLoad(tab.id);
-    await sleep(2000);
+    await sleep(3000); // Extra time for JS-rendered content
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -964,8 +948,20 @@ async function searchRetailerViaGoogle(productTitle, retailer) {
     });
 
     const products = results?.[0]?.result || [];
-    // Return the best match (first result) or null
-    return products.length > 0 ? products[0] : null;
+    console.log(`[compare] Google Shopping returned ${products.length} total products:`, products.map(p => `${(p.retailer || 'unknown')}:"${(p.title || '').substring(0, 30)}" ${p.price}`).join(', '));
+
+    // Filter out Amazon results and deduplicate by title
+    const seen = new Set();
+    const alternatives = products.filter(p => {
+      const retailer = (p.retailer || '').toLowerCase();
+      if (!retailer || retailer.includes('amazon')) return false;
+      const key = (p.title || '').toLowerCase().trim();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    console.log(`[compare] After filtering Amazon + dedup: ${alternatives.length} alternatives`);
+    return alternatives;
   } finally {
     try { await chrome.tabs.remove(tab.id); } catch (e) {}
   }
@@ -984,86 +980,151 @@ function shortenProductName(title) {
 }
 
 /**
- * Injected into Google Shopping results page to extract the best product match.
- * Since we use site: filters per retailer, we don't need to filter by retailer here.
- * Just grab the first valid product card with title, price, image, and link.
+ * Injected into Google Shopping results page to extract product matches.
+ * Extracts title, price, image, product URL, and retailer/store name.
  */
 function extractGoogleShoppingResults() {
   const results = [];
+  const debug = [];
 
-  // Strategy 1: product cards with shopping links
-  const allLinks = document.querySelectorAll('a[href*="/shopping/product/"], a[href*="url?url="], a[href*="/url?"]');
-  const processedCards = new Set();
+  debug.push(`Page title: ${document.title}`);
+  debug.push(`URL: ${location.href}`);
 
-  for (const link of allLinks) {
-    let card = link;
-    for (let i = 0; i < 5; i++) {
-      if (card.parentElement) card = card.parentElement;
+  // Dump page structure for debugging — find all elements with $ price text
+  const priceEls = [];
+  document.querySelectorAll('*').forEach(el => {
+    if (el.children.length === 0 && /^\$\d/.test(el.textContent.trim())) {
+      priceEls.push(el);
     }
-    if (processedCards.has(card)) continue;
-    processedCards.add(card);
+  });
+  debug.push(`Elements with $ price: ${priceEls.length}`);
+
+  // For each price element, walk up to find the product card container
+  const processedContainers = new Set();
+  for (const priceEl of priceEls) {
+    // Walk up to find a reasonable card container (stop at ~8 levels or a known container)
+    let container = priceEl;
+    for (let i = 0; i < 8; i++) {
+      if (!container.parentElement || container.parentElement === document.body) break;
+      container = container.parentElement;
+      // Stop if container is large enough to be a card (has both text and image)
+      if (container.querySelector('img') && container.textContent.length > 20 && container.textContent.length < 3000) break;
+    }
+    if (processedContainers.has(container)) continue;
+    processedContainers.add(container);
 
     try {
-      // Title
-      let title = '';
-      const h3 = card.querySelector('h3');
-      if (h3) {
-        title = h3.textContent.trim();
-      } else {
-        for (const el of card.querySelectorAll('div, span')) {
-          const t = el.textContent.trim();
-          if (t.length > 10 && t.length < 150 && el.children.length === 0) { title = t; break; }
-        }
-      }
-      if (!title || title.length < 5) continue;
+      const cardText = container.textContent || '';
 
       // Price
-      let price = '';
-      for (const el of card.querySelectorAll('span, div, b')) {
-        const t = el.textContent.trim();
-        if (/^\$[\d,.]+$/.test(t)) { price = t; break; }
-      }
+      const priceMatch = cardText.match(/\$[\d,.]+/);
+      const price = priceMatch ? priceMatch[0] : '';
+      if (!price) continue;
+
+      // Title: find the longest leaf text node that isn't a price
+      let title = '';
+      container.querySelectorAll('*').forEach(el => {
+        if (el.children.length === 0) {
+          const t = el.textContent.trim();
+          if (t.length > title.length && t.length > 5 && t.length < 200 && !/^\$/.test(t) && !/^[\d.]+$/.test(t)) {
+            title = t;
+          }
+        }
+      });
+      if (!title || title.length < 5) continue;
 
       // Image
-      let image_url = '';
-      const img = card.querySelector('img:not([src*="google"]):not([src*="gstatic"])');
-      if (img) image_url = img.src || img.getAttribute('data-src') || '';
+      const img = container.querySelector('img:not([src*="google"]):not([src*="gstatic"]):not([width="1"])');
+      const image_url = img ? (img.src || img.getAttribute('data-src') || '') : '';
 
-      // Product URL — extract actual destination from Google redirect
+      // Product URL — try all anchors in the container to find a real destination URL
       let product_url = '';
-      const productLink = card.querySelector('a[href*="/shopping/product/"]') || card.querySelector('a[href*="url?url="]') || card.querySelector('a[href^="http"]');
-      if (productLink) {
-        const href = productLink.getAttribute('href') || '';
+      const allContainerLinks = container.querySelectorAll('a[href]');
+      for (const link of allContainerLinks) {
+        const href = link.getAttribute('href') || '';
+        // Extract actual URL from Google redirects
         if (href.includes('url?url=')) {
           const m = href.match(/url\?url=([^&]+)/);
-          product_url = m ? decodeURIComponent(m[1]) : href;
-        } else {
-          product_url = href.startsWith('http') ? href : 'https://www.google.com' + href;
+          if (m) { product_url = decodeURIComponent(m[1]); break; }
+        } else if (href.includes('url?q=')) {
+          const m = href.match(/url\?q=([^&]+)/);
+          if (m) { product_url = decodeURIComponent(m[1]); break; }
+        } else if (href.includes('/url?')) {
+          // Other Google redirect patterns
+          const m = href.match(/[?&](?:url|q)=([^&]+)/);
+          if (m) { product_url = decodeURIComponent(m[1]); break; }
+        }
+      }
+      // Fallback: Google Shopping product page link
+      if (!product_url) {
+        for (const link of allContainerLinks) {
+          const href = link.getAttribute('href') || '';
+          if (href.includes('/shopping/product/')) {
+            product_url = href.startsWith('http') ? href : 'https://www.google.com' + href;
+            break;
+          }
+        }
+      }
+      // Last resort: any external http link (not google internal)
+      if (!product_url) {
+        for (const link of allContainerLinks) {
+          const href = link.getAttribute('href') || '';
+          if (href.startsWith('http') && !href.includes('google.com/search') && !href.includes('accounts.google') && !href.includes('chrome-extension://')) {
+            product_url = href;
+            break;
+          }
         }
       }
 
-      if (title && (price || image_url)) {
-        results.push({ title, price, image_url, product_url });
+      // Retailer: scan for known retailer names in card text
+      let retailer = '';
+      const lowerText = cardText.toLowerCase();
+      const retailerList = [
+        ['temu', 'Temu'], ['poshmark', 'Poshmark'], ['walmart', 'Walmart'],
+        ['shein', 'SHEIN'], ['target', 'Target'], ['thredup', 'ThredUp'],
+        ['urban outfitt', 'Urban Outfitters'], ['mooyius', 'Mooyius'],
+        ['banana repub', 'Banana Republic'], ['nordstrom', 'Nordstrom'],
+        ['h&m', 'H&M'], ['asos', 'ASOS'], ['zara', 'Zara'],
+        ['amazon', 'Amazon'], ['ebay', 'eBay'], ['etsy', 'Etsy'],
+        ['macy', 'Macys'], ['kohls', 'Kohls'], ['jcpenney', 'JCPenney']
+      ];
+      for (const [key, name] of retailerList) {
+        if (lowerText.includes(key)) { retailer = name; break; }
       }
-    } catch (e) {}
-  }
+      // Fallback: extract from URL domain
+      if (!retailer && product_url) {
+        try {
+          const domain = new URL(product_url).hostname.replace('www.', '');
+          retailer = domain.split('.')[0].charAt(0).toUpperCase() + domain.split('.')[0].slice(1);
+        } catch (e) {}
+      }
 
-  // Strategy 2: data attribute fallback
-  if (results.length === 0) {
-    for (const card of document.querySelectorAll('[data-docid], [data-prid]')) {
-      try {
-        const title = (card.querySelector('h3, [aria-label]')?.textContent || '').trim();
-        let price = '';
-        card.querySelectorAll('span, b').forEach(el => {
-          if (!price && /^\$[\d,.]+$/.test(el.textContent.trim())) price = el.textContent.trim();
-        });
-        const image_url = card.querySelector('img')?.src || '';
-        const product_url = card.querySelector('a')?.href || '';
-        if (title && price) results.push({ title, price, image_url, product_url });
-      } catch (e) {}
+      results.push({ title, price, image_url, product_url, retailer });
+      if (results.length >= 15) break;
+    } catch (e) {
+      debug.push(`Error: ${e.message}`);
     }
   }
 
+  debug.push(`Price-based extraction found: ${results.length} results`);
+
+  // Debug fallback: if nothing found, dump page structure
+  if (results.length === 0) {
+    const allLeafText = [];
+    document.querySelectorAll('*').forEach(el => {
+      if (el.children.length === 0 && el.textContent.trim().length > 3) {
+        allLeafText.push(el.textContent.trim().substring(0, 60));
+      }
+    });
+    debug.push(`Leaf text elements: ${allLeafText.length}`);
+    debug.push(`Sample: ${allLeafText.slice(0, 30).join(' | ')}`);
+    debug.push(`Body length: ${document.body?.textContent?.length || 0}`);
+    debug.push(`Anchors: ${document.querySelectorAll('a').length}`);
+    debug.push(`Images: ${document.querySelectorAll('img').length}`);
+  }
+
+  console.log('[compare-extract] Debug:', debug.join(' | '));
+  console.log('[compare-extract] Results:', JSON.stringify(results.map(r => ({ title: (r.title || '').substring(0, 40), price: r.price, retailer: r.retailer }))));
   return results;
 }
 

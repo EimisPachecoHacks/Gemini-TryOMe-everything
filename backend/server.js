@@ -166,11 +166,25 @@ app.use((err, req, res, next) => {
 
 // Create HTTP server and attach WebSocket for voice streaming (Vertex AI proxy)
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: "/ws/voice-live" });
+const wss = new WebSocketServer({ noServer: true });
 wss.on("connection", voiceLiveHandler);
 
+// Manual upgrade handler — more reliable on Cloud Run than path-based matching
+server.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+  console.log(`[ws] Upgrade request: ${pathname}`);
+  if (pathname === "/ws/voice-live") {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  } else {
+    console.warn(`[ws] Rejected upgrade for unknown path: ${pathname}`);
+    socket.destroy();
+  }
+});
+
 server.listen(PORT, () => {
-  console.log(`GeminiTryOnMe backend running on port ${PORT}`);
+  console.log(`TryOnMeEverything backend running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/`);
   console.log(`WebSocket: ws://localhost:${PORT}/ws/voice-live`);
   console.log(`GCP Project: ${process.env.GCP_PROJECT_ID || "(using default)"}`);

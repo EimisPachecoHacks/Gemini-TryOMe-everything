@@ -105,10 +105,11 @@ module.exports = async function handleConnection(ws, req) {
             tools: GISELLE_TOOLS,
             realtimeInputConfig: {
               automaticActivityDetection: {
+                disabled: false,
                 startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
                 endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
-                prefixPaddingMs: 40,
-                silenceDurationMs: 500,
+                prefixPaddingMs: 20,
+                silenceDurationMs: 100,
               },
             },
           },

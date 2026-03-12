@@ -535,6 +535,8 @@ async function handleTryOn(index) {
   } catch (err) {
     stopTryOnTimer();
     console.error(`%c ✗ TRY-ON FAILED %c ${err.message}`, "background:#f44336;color:#fff;font-weight:bold;padding:2px 6px;border-radius:3px;", "color:#f44336;font-weight:bold;");
+    // Notify voice agent so it doesn't stay muted
+    chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
     closeTryOnModal();
     showPageToast("Try-on failed: " + err.message);
   } finally {

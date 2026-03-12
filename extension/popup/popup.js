@@ -1363,47 +1363,7 @@ async function handleCompareSearch() {
   btn.textContent = 'Classifying...';
   resultsEl.innerHTML = '<p class="compare-loading">Analyzing product category...</p>';
 
-  // Step 1: Classify the query via AI to determine if size/sex should be appended
-  let enrichedQuery = query;
-  try {
-    const classification = await sendMsg({
-      type: 'API_CALL',
-      endpoint: '/api/classify-query',
-      method: 'POST',
-      data: { query },
-    });
-
-    if (classification && !classification.error) {
-      const sizeParts = [];
-
-      // Append sex if needed and available
-      if (classification.needsSex && cachedProfile?.sex) {
-        const sexLabel = cachedProfile.sex === 'male' ? 'for men' : 'for women';
-        // Only append if not already in query
-        if (!query.toLowerCase().includes('for men') && !query.toLowerCase().includes('for women') &&
-            !query.toLowerCase().includes("men's") && !query.toLowerCase().includes("women's")) {
-          sizeParts.push(sexLabel);
-        }
-      }
-
-      // Append clothing size if needed and available
-      if (classification.needsClothingSize && cachedProfile?.clothesSize) {
-        sizeParts.push(`size ${cachedProfile.clothesSize}`);
-      }
-
-      // Append shoe size if needed and available
-      if (classification.needsShoeSize && cachedProfile?.shoesSize) {
-        sizeParts.push(`size ${cachedProfile.shoesSize}`);
-      }
-
-      if (sizeParts.length > 0) {
-        enrichedQuery = `${query} ${sizeParts.join(' ')}`;
-        console.log(`[compare] Enriched query: "${enrichedQuery}" (category: ${classification.category})`);
-      }
-    }
-  } catch (classifyErr) {
-    console.warn('[compare] Classification failed, using original query:', classifyErr.message);
-  }
+  const enrichedQuery = query;
 
   btn.textContent = 'Searching...';
   resultsEl.innerHTML = '<p class="compare-loading">Searching across retailers...</p>';
@@ -1441,8 +1401,10 @@ async function handleCompareSearch() {
           </div>
         </a>`;
 
-      const altCards = alts.length > 0
-        ? alts.map(alt => `
+      // Filter out alternatives with invalid URLs
+      const validAlts = alts.filter(alt => alt.product_url && alt.product_url.startsWith('http') && !alt.product_url.includes('chrome-extension://'));
+      const altCards = validAlts.length > 0
+        ? validAlts.map(alt => `
           <a href="${esc(alt.product_url)}" class="compare-item compare-item--alt" target="_blank" rel="noopener">
             <img class="compare-item-img compare-item-img--small" src="${esc(alt.image_url)}" alt="" onerror="this.style.display='none'" />
             <div class="compare-item-info">
@@ -1739,9 +1701,9 @@ document.addEventListener('DOMContentLoaded', init);
   let modelSpeakingStartTime = 0; // When model started speaking (for AEC grace period)
   let muteNextModelTurn = false; // Suppress model's duplicate announcement after async tool response
   let loudChunkCount = 0; // Consecutive loud audio chunks (for barge-in detection)
-  const ECHO_GRACE_MS = 1500; // Let browser AEC stabilize before allowing barge-in
-  const BARGE_IN_RMS = 5000; // ~15% of max int16 — filters speaker echo while allowing real speech
-  const BARGE_IN_CHUNKS = 5; // Need 5 consecutive loud chunks to confirm real barge-in
+  const ECHO_GRACE_MS = 3000; // Let browser AEC stabilize — protects full greeting from echo cutoff
+  const BARGE_IN_RMS = 4500; // ~14% of max int16 — higher threshold filters echo better
+  const BARGE_IN_CHUNKS = 4; // Need 4 consecutive loud chunks to confirm real barge-in
   let lastTryOnSource = null; // "outfit" or "search" — tracks which mode did the last try-on
 
   // Get WebSocket URL for the Vertex AI voice proxy on our backend
@@ -1907,6 +1869,7 @@ document.addEventListener('DOMContentLoaded', init);
       isModelSpeaking = false;
       loudChunkCount = 0;
       muteNextModelTurn = false; // Allow speech on subsequent turns
+      userSpokeSinceLastModelTurn = false; // Reset — user hasn't spoken yet since this model turn ended
       currentOutputMsg = null;
       currentInputMsg = null;
     }
@@ -2004,7 +1967,7 @@ document.addEventListener('DOMContentLoaded', init);
               role: 'user',
               parts: [
                 { inlineData: { data: screenshotBase64, mimeType: 'image/jpeg' } },
-                { text: `These are the smart search results showing ${msg.products?.length || 0} products. Each product has a numbered badge visible in the image. The user can ask you to recommend items based on their appearance.` },
+                { text: `[System: Smart search results are now showing ${msg.products?.length || 0} products on screen. The user is browsing. Do NOT recommend items. Do NOT call recommend_items. Wait SILENTLY for the user to speak first. Only recommend if the user EXPLICITLY asks you to.]` },
               ],
             }],
             turnComplete: false,
@@ -2022,7 +1985,7 @@ document.addEventListener('DOMContentLoaded', init);
           .filter(([, items]) => items.length > 0)
           .map(([cat, items]) => `${cat}: ${items.length} items`)
           .join(', ');
-        sendGeminiText(`The outfit builder has loaded with these items: ${summary}. The user can ask you to recommend the best combination of items across these categories.`);
+        sendGeminiText(`[System: The outfit builder UI has loaded with ${summary}. The user is now browsing items. Do NOT recommend items. Do NOT call recommend_items. Do NOT suggest which items to pick. Wait SILENTLY for the user to speak first. Only recommend if the user EXPLICITLY asks you to.]`);
         console.log('[Giselle] Sent outfit items context to voice session');
       }
     }
@@ -2116,6 +2079,7 @@ document.addEventListener('DOMContentLoaded', init);
         // Model is silent — send all audio freely
         if (!isModelSpeaking) {
           ws.send(int16Array.buffer);
+          userSpokeSinceLastModelTurn = true; // User is speaking
           return;
         }
 
@@ -2133,8 +2097,16 @@ document.addEventListener('DOMContentLoaded', init);
         if (rms > BARGE_IN_RMS) {
           loudChunkCount++;
           if (loudChunkCount >= BARGE_IN_CHUNKS) {
-            // Real speech detected — send audio for barge-in
+            // Real barge-in detected — stop model playback locally and send user audio
+            if (isModelSpeaking) {
+              console.log('[Giselle] 🔇 Barge-in! Stopping model playback, RMS:', Math.round(rms));
+              stopPlayback();
+              isModelSpeaking = false;
+              loudChunkCount = 0;
+              muteNextModelTurn = true; // Suppress remaining audio from this model turn
+            }
             ws.send(int16Array.buffer);
+            userSpokeSinceLastModelTurn = true;
           }
         } else {
           loudChunkCount = 0;
@@ -2318,6 +2290,7 @@ document.addEventListener('DOMContentLoaded', init);
   // Track outfit builder confirmation state
   let outfitConfirmedNoAccessories = false;
   let pendingOutfitData = null;
+  let userSpokeSinceLastModelTurn = false; // Tracks if user spoke since model's last turn — used to enforce confirmation
 
   // Track last executed tool call to prevent loops
   let lastToolCallKey = null;
@@ -2396,6 +2369,12 @@ document.addEventListener('DOMContentLoaded', init);
           continue;
         }
         case 'build_outfit': {
+          // Guard: user must have spoken (confirmed) before we execute build_outfit
+          if (!userSpokeSinceLastModelTurn) {
+            console.warn('[Giselle] ⚠️ build_outfit blocked — user has not confirmed yet (no speech since last model turn)');
+            sendToolResp(call.id, call.name, 'WAIT — the user has not confirmed yet. You MUST ask "How does that sound? Would you like to change anything?" and wait for the user to respond before calling build_outfit. Do NOT call build_outfit again until the user speaks.');
+            continue;
+          }
           // Guard: if no accessories provided, bounce back to Gemini to ask the user
           // Skip guard for thinking-based synthetic calls — they can't send tool responses back
           const isSyntheticCall = call.id && call.id.startsWith('thinking-');
@@ -2525,8 +2504,7 @@ document.addEventListener('DOMContentLoaded', init);
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to save. Try on an item first.');
             } else {
-              sendToolResp(call.id, call.name, 'Saved to favorites.');
-              muteNextModelTurn = true;
+              sendToolResp(call.id, call.name, 'Done — saved to favorites.');
             }
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No try-on result to save. Try on an item first.');
@@ -2539,7 +2517,7 @@ document.addEventListener('DOMContentLoaded', init);
             if (result?.success === false) {
               sendToolResp(call.id, call.name, result.error || 'No try-on result to animate. Try on an item first.');
             } else {
-              sendToolResp(call.id, call.name, 'OK. Do NOT speak again until you receive a system notification that the video is ready.');
+              sendToolResp(call.id, call.name, 'Animation started. Wait silently for the system notification that the video is ready.');
               muteNextModelTurn = true;
             }
           }).catch(() => {
@@ -2550,8 +2528,7 @@ document.addEventListener('DOMContentLoaded', init);
         case 'save_video': {
           // Send message to content script to save the current video
           sendMsg({ type: 'SAVE_VIDEO', source: lastTryOnSource || 'search' }).then((result) => {
-            sendToolResp(call.id, call.name, result?.success ? 'Video saved.' : 'Failed to save video. Generate a video first.');
-            muteNextModelTurn = true;
+            sendToolResp(call.id, call.name, result?.success ? 'Done — video saved.' : 'Failed to save video. Generate a video first.');
           }).catch(() => {
             sendToolResp(call.id, call.name, 'No video to save. Generate a video first.');
           });
@@ -2636,7 +2613,7 @@ document.addEventListener('DOMContentLoaded', init);
                     .join('\n');
                   console.log('[recommend_items] Sending outfit combination back to Gemini + auto-selecting', picks.length, 'items');
                   sendToolResp(call.id, call.name,
-                    `Here is my recommended outfit combination based on your body type and skin tone:\n${comboText}\n${result.overallReason ? '\nOverall: ' + result.overallReason : ''}\n\nTell the user the recommended item NUMBER for each category and explain WHY this combination works for them. Mention specific item numbers so they can select them.\n\nIMPORTANT: Do NOT call try_on_outfit now. Ask the user if they want to try on this combination first. Wait for their explicit yes.`
+                    `AI VISION ANALYSIS RESULTS — relay each reason to the user:\n\n${comboText}\n${result.overallReason ? '\nOverall styling: ' + result.overallReason : ''}\n\nINSTRUCTIONS: Present picks category by category. For EACH item, say the number, describe the piece, and explain WHY it was chosen.\n- For clothing (top, bottom, shoes): explain how it flatters the user's body/skin tone.\n- For accessories (necklace, earrings, bracelet): describe WHAT you like about the specific piece (its design, texture, color) AND how it coordinates with the other accessories and the outfit. Example: "For the necklace, I picked number 3, the layered gold chain — I love how the delicate layers add dimension, and the warm gold ties beautifully with the earrings and bracelet."\nNEVER give generic one-liners like "adds a polished touch." Each accessory deserves 2 sentences minimum.\n\nAfter all 6, ask "Would you like to try this outfit on?" and WAIT.`
                   );
                 } else if (result.recommendations && result.recommendations.length > 0) {
                   // Fallback to flat recommendations
@@ -2773,6 +2750,12 @@ document.addEventListener('DOMContentLoaded', init);
           continue; // async
         }
         case 'try_on_outfit': {
+          // Guard: user must have confirmed before trying on
+          if (!userSpokeSinceLastModelTurn) {
+            console.warn('[Giselle] ⚠️ try_on_outfit blocked — user has not confirmed yet');
+            sendToolResp(call.id, call.name, 'WAIT — the user has not confirmed yet. Ask "Would you like to try this outfit on?" and wait for the user to say yes before calling try_on_outfit.');
+            continue;
+          }
           lastTryOnSource = 'outfit';
           addMessage('bot', 'Starting outfit try-on with all selected items...');
           chrome.runtime.sendMessage({ type: 'VOICE_TRY_ON_OUTFIT' }, (resp) => {

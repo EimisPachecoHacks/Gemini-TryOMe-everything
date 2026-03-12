@@ -1,16 +1,27 @@
 # Gemini TryOnMe Everything
 
-**AI-Powered Universal Virtual Try-On**
+**AI-Powered Universal Virtual Try-On with Live Voice Stylist**
 
-A Chrome Extension that lets you see clothes on YOUR body before you buy. Browse any product page on Amazon, SHEIN, or Temu, click "Try It On", and see the garment on your own body in seconds — powered by Google Gemini and Grok xAI.
+A Chrome Extension that lets you see clothes on YOUR body before you buy. Browse any product page on Amazon, SHEIN, or Temu, click "Try It On", and see the garment on your own body in seconds. Talk to **Giselle**, your AI voice stylist, to get personalized outfit recommendations in real-time — she sees your screen, analyzes your body type, and helps you build the perfect look.
 
-> Built for the **Google DeepMind Gemini Hackathon 2025**
+> Built for the [**Gemini Live Agent Challenge**](https://geminiliveagentchallenge.devpost.com/) — **Live Agents** category
+>
+> Powered by **Gemini Live API**, **Gemini 3 Pro Image**, **Gemini 2.5 Flash**, and hosted on **Google Cloud Run**
 
 ---
 
 ## Features
 
-### 1. Product Page Try-On
+### 1. Giselle — Live Voice AI Stylist (Gemini Live API)
+Talk to Giselle, your personal AI fashion stylist, using natural voice conversation. She can see your screen, analyze your body type and skin tone, and help you find the perfect outfit.
+- **Real-time voice conversation** via Gemini Live API (`gemini-live-2.5-flash-native-audio`)
+- **Barge-in support** — interrupt Giselle mid-sentence naturally (client-side energy-threshold detection + `NO_INTERRUPTION` mode)
+- **12 voice-activated tools** — search products, build outfits, try on items, save favorites, animate videos, get AI recommendations — all hands-free
+- **Vision-based recommendations** — Giselle calls an AI vision model that analyzes your photo + all items on screen to recommend the best combination
+- **Distinct persona** — warm, fashion-forward stylist with the Aoede voice, context-aware responses
+- **WebSocket proxy architecture** — browser connects to backend via WebSocket, backend proxies to Gemini Live API via Vertex AI with server-side authentication
+
+### 2. Product Page Try-On
 Browse any product page on Amazon, SHEIN, or Temu. A **"Try It On"** button appears on the product image. Click it and see the garment on your body in seconds.
 - Auto-detects product type (tops, bottoms, dresses, footwear, cosmetics)
 - Smart outfit conflict resolution (e.g., trying a top on someone wearing a dress)
@@ -19,32 +30,32 @@ Browse any product page on Amazon, SHEIN, or Temu. A **"Try It On"** button appe
 - Full body and half body framing options
 - 3 selectable AI-generated poses
 
-### 2. AI Smart Search
+### 3. AI Smart Search
 Type what you want in natural language: *"black dresses for women"*. An AI agent browses products, applies quality filters (4+ stars), and returns 20+ curated products — each with a "Try On" button.
 - Natural language queries instead of keyword search
 - Product grid with prices, ratings, and direct links
 - Instant try-on from search results
 
-### 3. Outfit Builder
+### 4. Outfit Builder
 Build a complete outfit by describing a **top, bottom, and shoes** separately. AI searches for each category in parallel, presents a virtual wardrobe with hangers, and lets you mix & match. Try the full outfit together in one shot.
 - 3 parallel product searches
 - Background removal on all product images
 - Visual wardrobe with hanger display
 - Single-call multi-garment try-on with identity preservation
 
-### 4. Video Animation
+### 5. Video Animation
 Transform any try-on result into a 6-second video with natural model-like movement, fabric flow, and subtle poses.
 - Powered by **Grok Imagine Video** (xAI via fal.ai)
 - 720p portrait format (9:16)
 - Save to cloud or download locally
 
-### 5. Cosmetics Try-On
+### 6. Cosmetics Try-On
 Virtual makeup application using AI inpainting. Try lipstick, eyeshadow, blush, foundation, eyeliner, and mascara in any color on your own face.
 
-### 6. Sharing & Email
+### 7. Sharing & Email
 Share your try-on results via download, clipboard copy, or email. Send branded emails with the try-on image embedded inline to yourself or anyone.
 
-### 7. Favorites & Profiles
+### 8. Favorites & Profiles
 Full user account system with cloud storage. Save your best looks, browse your try-on history, and manage multiple AI-generated profile poses.
 
 ---
@@ -54,18 +65,20 @@ Full user account system with cloud storage. Save your best looks, browse your t
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────────┐
 │   Chrome Extension   │     │   Express Backend    │     │    AI Models          │
-│   (Manifest V3)      │────>│   (Node.js)          │────>│                      │
-│                      │     │                      │     │  Gemini 2.5 Flash    │
-│  • Content Script    │     │  /api/try-on         │     │  Gemini 3 Pro Image  │
-│  • Background Worker │     │  /api/try-on/outfit  │     │  Grok xAI Video      │
-│  • Popup Side Panel  │     │  /api/analyze        │     │                      │
-│  • Smart Search UI   │     │  /api/cosmetics      │     └──────────────────────┘
-│  • Outfit Builder UI │     │  /api/video          │
-│                      │     │  /api/auth/*         │
-└─────────────────────┘     │  /api/profile        │
-                             │  /api/favorites      │
-                             │  /api/smart-search   │
-                             │  /api/share          │
+│   (Manifest V3)      │────>│   (Cloud Run)        │────>│                      │
+│                      │     │                      │     │  Gemini Live API     │
+│  • Content Script    │     │  /api/try-on         │     │  (native audio)      │
+│  • Background Worker │     │  /api/try-on/outfit  │     │  Gemini 2.5 Flash    │
+│  • Popup Side Panel  │     │  /api/analyze        │     │  Gemini 3 Pro Image  │
+│  • Smart Search UI   │     │  /api/cosmetics      │     │  Gemini 3 Flash      │
+│  • Outfit Builder UI │     │  /api/video          │     │  Grok xAI Video      │
+│  • Voice Agent UI    │     │  /api/recommend      │     │                      │
+│                      │     │  /api/smart-search   │     └──────────────────────┘
+└─────────┬───────────┘     │  /api/auth/*         │
+          │                  │  /api/profile        │
+          │  WebSocket       │  /api/favorites      │
+          └─────────────────>│  /ws/voice-live ─────────> Gemini Live API
+                             │  (Vertex AI proxy)   │     (bidirectional audio)
                              └─────────────────────┘
                                       │
                       ┌───────────────┼──────────────┐
@@ -108,14 +121,18 @@ The outfit builder uses a single Gemini 3 Pro Image call with all garments + fac
 
 | Model | Provider | Role |
 |-------|----------|------|
+| **Gemini Live 2.5 Flash Native Audio** | Google (Vertex AI) | Real-time voice conversation with Giselle AI stylist |
 | **Gemini 2.5 Flash Image** | Google | Product classification, outfit detection, single-garment try-on, garment extraction, AI profile generation, background removal, cosmetics inpainting |
 | **Gemini 3 Pro Image** | Google | Multi-garment outfit try-on (better identity preservation) |
+| **Gemini 3 Flash** | Google | Vision-based outfit recommendations (with thinking mode) |
 | **Grok Imagine Video** | xAI (via fal.ai) | Image-to-video animation of try-on results |
 
 ### Google Cloud Infrastructure
 
 | Service | Usage |
 |---------|-------|
+| **Google Cloud Run** | Backend hosting (Node.js + Express), auto-scaling, WebSocket support |
+| **Vertex AI** | Gemini Live API access with server-side authentication (service account) |
 | **Firebase Auth** | User authentication, email verification, JWT tokens |
 | **Google Cloud Storage** | User photos, AI-generated poses, try-on results, videos |
 | **Cloud Firestore** | User profiles, favorites, video metadata |
@@ -271,6 +288,8 @@ curl http://localhost:3001/
 | POST | `/api/image/remove-bg` | Background removal (Gemini) |
 | POST | `/api/smart-search` | AI-powered product search |
 | POST | `/api/share/email` | Email sharing of try-on results |
+| POST | `/api/recommend` | Vision-based AI outfit recommendations |
+| WS | `/ws/voice-live` | Gemini Live API WebSocket proxy (voice agent) |
 | POST | `/api/auth/signup` | User registration |
 | POST | `/api/auth/login` | User login |
 | POST | `/api/auth/confirm` | Email verification |
@@ -302,12 +321,15 @@ GeminiTryOnMe/
 │   │   ├── profile.js         # User profile management
 │   │   ├── favorites.js       # Favorites CRUD
 │   │   ├── smartSearch.js     # AI Smart Search endpoint
-│   │   └── share.js           # Email sharing endpoint
+│   │   ├── share.js           # Email sharing endpoint
+│   │   ├── recommend.js      # Vision-based AI recommendations
+│   │   └── voiceLive.js      # Gemini Live API WebSocket proxy
 │   ├── services/
 │   │   ├── gemini.js          # Gemini API (try-on, extraction, profiles)
 │   │   ├── imageProcessor.js  # Image processing (BG removal, inpainting)
 │   │   ├── classifier.js      # Product classification (Gemini)
 │   │   ├── grok.js            # Grok video generation (fal.ai)
+│   │   ├── giselleLive.js     # Voice agent config (system prompt, tools)
 │   │   ├── giselle.js         # Voice chat (Gemini)
 │   │   ├── firestore.js       # Firestore operations
 │   │   ├── storage.js         # Cloud Storage operations
@@ -353,7 +375,54 @@ GeminiTryOnMe/
 
 ---
 
+## Cloud Deployment
+
+### Automated Deploy to Google Cloud Run
+
+A one-command deploy script is provided:
+
+```bash
+./deploy.sh
+```
+
+This script:
+1. Validates required environment variables and GCP authentication
+2. Builds and deploys the backend to Google Cloud Run using `gcloud run deploy`
+3. Configures memory (4Gi), CPU (2), timeout (600s), and auto-scaling (0-4 instances)
+4. Outputs the deployed service URL
+
+**Prerequisites for deployment:**
+- `gcloud` CLI installed and authenticated (`gcloud auth login`)
+- Docker or Cloud Build enabled on the GCP project
+- Service account with `roles/aiplatform.user` IAM role (for Vertex AI / Gemini Live API)
+
+### Manual Deploy
+
+```bash
+cd backend
+gcloud run deploy geminitryonme-backend \
+  --source . \
+  --region us-central1 \
+  --project YOUR_PROJECT_ID \
+  --allow-unauthenticated \
+  --timeout=600 \
+  --memory=4Gi \
+  --cpu=2 \
+  --min-instances=0 \
+  --max-instances=4
+```
+
+---
+
 ## Testing
+
+### Run Unit Tests
+
+```bash
+cd backend && npm test
+```
+
+Tests cover: outfit builder (6-category search, concurrency limiter, 7-image try-on), circuit breaker state machine, input validation, and voice agent (12 tools, system prompt, config).
 
 ### Verify Backend is Running
 ```bash

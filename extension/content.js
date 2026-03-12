@@ -951,6 +951,8 @@
     } catch (err) {
       clearInterval(timerInterval);
       body.removeAttribute("inert"); // Allow interaction with error UI
+      // Notify voice agent so it doesn't stay muted
+      chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
       console.error("%c ✗ TRY-ON FAILED %c " + err.message, "background:#f44336;color:#fff;font-weight:bold;padding:2px 6px;border-radius:3px;", "color:#f44336;font-weight:bold;");
       body.innerHTML = `
         <div class="nova-tryon-error">

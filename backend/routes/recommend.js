@@ -75,7 +75,7 @@ router.post("/", async (req, res, next) => {
       const totalItems = Object.values(outfitItems).reduce((sum, arr) => sum + (arr?.length || 0), 0);
 
       parts.push({
-        text: `The user is building an outfit. Here are all available items organized by category:\n\n${categoryLists}\n\nThe user is ${sex}, size ${size}.\n\nYour task: Recommend the BEST combination of items — pick ONE item per category that creates the most cohesive, flattering outfit for this person.\n\nConsider:\n- Color coordination across all pieces\n- Style consistency (casual/formal/sporty)\n- How each piece flatters the user's body type and skin tone\n- Pattern mixing rules\n- Accessory coordination with the main outfit pieces\n\nReturn a JSON object with this EXACT structure:\n{\n  "outfitCombination": {\n    "top": { "number": 2, "reason": "The emerald green V-neck complements your warm skin tone" },\n    "bottom": { "number": 1, "reason": "Dark wash jeans create a balanced silhouette" },\n    "shoes": { "number": 3, "reason": "White sneakers keep it casual and match the top's vibe" },\n    "necklace": { "number": 1, "reason": "Gold pendant picks up the warm tones" },\n    "earrings": { "number": 2, "reason": "Simple studs don't compete with the necklace" },\n    "bracelets": { "number": 1, "reason": "Gold bangle ties in with the necklace" }\n  },\n  "overallReason": "This outfit creates a cohesive casual-chic look with warm earth tones that complement your complexion"\n}\n\nOnly include categories that have items available. Be specific about WHY each pick works WITH the other items.\n\nIMPORTANT: Return ONLY valid JSON, no additional text.`,
+        text: `The user is building an outfit. Here are all available items organized by category:\n\n${categoryLists}\n\nThe user is ${sex}, size ${size}.\n\nYour task: Recommend the BEST combination of items — pick ONE item per category that creates the most cohesive, flattering outfit for this person.\n\nCRITICAL RULES:\n- You MUST carefully examine EACH category independently. Look at every item's title, price, and visual appearance in the screenshot.\n- Do NOT pick the same number for multiple categories. Each category has DIFFERENT items — analyze them separately.\n- For accessories (necklace, earrings, bracelets): these are 3 SEPARATE categories with DIFFERENT products. Pick the best item from each category based on how it coordinates with the outfit AND with the other accessories.\n- Each reason MUST reference the specific product name/description and explain why it works with the rest of the outfit.\n\nConsider:\n- Color coordination across all pieces\n- Style consistency (casual/formal/sporty)\n- How each piece flatters the user's body type and skin tone\n- Pattern mixing rules\n- Accessory coordination (metal tones should complement each other, don't over-accessorize)\n\nReturn a JSON object with this EXACT structure:\n{\n  "outfitCombination": {\n    "top": { "number": 2, "reason": "The emerald green V-neck complements your warm skin tone" },\n    "bottom": { "number": 1, "reason": "Dark wash jeans create a balanced silhouette" },\n    "shoes": { "number": 3, "reason": "White sneakers keep it casual and match the top's vibe" },\n    "necklace": { "number": 1, "reason": "Gold pendant picks up the warm tones" },\n    "earrings": { "number": 2, "reason": "Simple studs don't compete with the necklace" },\n    "bracelets": { "number": 1, "reason": "Gold bangle ties in with the necklace" }\n  },\n  "overallReason": "This outfit creates a cohesive casual-chic look with warm earth tones that complement your complexion"\n}\n\nOnly include categories that have items available. Be specific about WHY each pick works WITH the other items.\n\nIMPORTANT: Return ONLY valid JSON, no additional text.`,
       });
 
       console.log(`[recommend] OUTFIT MODE: ${totalItems} items across ${Object.keys(outfitItems).filter(k => outfitItems[k]?.length > 0).length} categories, userPhoto: ${!!userPhoto}, screenshot: ${!!screenshot}, user: ${sex} size ${size}`);
@@ -86,7 +86,7 @@ router.post("/", async (req, res, next) => {
         config: {
           systemInstruction: "You are an expert personal stylist AI specializing in building complete outfits. You analyze a person's photo and product selections to recommend the best combination of items that work together as a cohesive outfit. You consider body type, skin tone, color theory, style consistency, and accessory coordination. Your recommendations are specific to the person — never generic.",
           temperature: 0.3,
-          thinkingConfig: { thinkingBudget: 0 },
+          thinkingConfig: { thinkingBudget: 2048 },
         },
       }));
 
@@ -130,7 +130,7 @@ router.post("/", async (req, res, next) => {
         config: {
           systemInstruction: "You are an expert personal stylist AI. You analyze a person's photo and product images to give honest, personalized fashion recommendations. You consider body type, skin tone, face shape, current style, and color theory. Your recommendations are specific to the person — never generic.",
           temperature: 0.3,
-          thinkingConfig: { thinkingBudget: 0 },
+          thinkingConfig: { thinkingBudget: 2048 },
         },
       }));
 

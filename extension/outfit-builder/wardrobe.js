@@ -687,6 +687,8 @@ async function handleTryOn() {
     console.error("[Wardrobe] Try-on failed:", err);
     console.error("[Wardrobe] Error details:", err.message, err.stack);
     updateTryOnStatus("Failed: " + err.message);
+    // Notify voice agent so it doesn't stay muted
+    chrome.runtime.sendMessage({ type: 'TRYON_COMPLETE' });
     // Show error for 5s then restore
     setTimeout(() => {
       hideTryOnLoading();

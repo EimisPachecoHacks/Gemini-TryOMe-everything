@@ -78,9 +78,32 @@ The outfit builder supports **6 categories**: top, bottom, shoes, necklace, earr
 - `speechConfig` with `voiceName: "Aoede"`
 - `tools: GISELLE_TOOLS` (from `backend/services/giselleLive.js`)
 
+**VAD config** (matches Google's official example — do NOT change):
+```
+realtimeInputConfig: {
+  automaticActivityDetection: {
+    disabled: false,
+    startOfSpeechSensitivity: START_SENSITIVITY_LOW,
+    endOfSpeechSensitivity: END_SENSITIVITY_LOW,
+    prefixPaddingMs: 20,
+    silenceDurationMs: 100,
+  },
+},
+```
+- Reference: https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/multimodal-live-api/intro_multimodal_live_api_genai_sdk.ipynb
+- Do NOT change these VAD values — they match Google's official example
+- Do NOT add `activityHandling: NO_INTERRUPTION` — server-side barge-in must work natively
+
+**WebSocket server** (in `backend/server.js`):
+- Uses `noServer: true` mode with manual `upgrade` event handler
+- More reliable on Cloud Run than path-based WebSocket matching
+- Do NOT switch back to `new WebSocketServer({ server, path: "/ws/voice-live" })` — it caused 404 on Cloud Run
+
 **Do NOT add these — they cause disconnections**:
 - `sessionResumption` — causes 1008 "Operation is not implemented"
 - `contextWindowCompression` — causes 1008 "Operation is not implemented"
+- `thinkingConfig` — causes immediate session disconnect
+- `activityHandling: NO_INTERRUPTION` — breaks natural barge-in behavior
 - Any config field not listed above as required
 
 **Message flow**:
@@ -109,12 +132,17 @@ The Gemini Live API has **NO built-in echo cancellation**. The following client-
 **Energy-threshold gating** (in `workletNode.port.onmessage`):
 - When model is **silent** (`isModelSpeaking === false`): send ALL mic audio freely, automatic VAD handles it
 - When model is **speaking** (`isModelSpeaking === true`):
-  - First `ECHO_GRACE_MS` (1500ms): mic is fully muted to let browser AEC calibrate
-  - After grace period: only send audio if RMS > `BARGE_IN_RMS` (3000) for `BARGE_IN_CHUNKS` (3) consecutive chunks — allows real barge-in, blocks low-energy echo
+  - First `ECHO_GRACE_MS` (3000ms): mic is fully muted to let browser AEC calibrate
+  - After grace period: only send audio if RMS > `BARGE_IN_RMS` (4500) for `BARGE_IN_CHUNKS` (4) consecutive chunks — allows real barge-in, blocks low-energy echo
 - Do NOT remove the energy-threshold gating or replace it with a full mic mute (breaks barge-in)
 - Do NOT remove the grace period (breaks greeting)
-- Do NOT increase `BARGE_IN_RMS` above ~5000 (makes barge-in too hard to trigger)
-- Do NOT decrease `ECHO_GRACE_MS` below 1000 (greeting will get cut off)
+- Do NOT increase `BARGE_IN_RMS` above ~6000 (makes barge-in too hard to trigger)
+- Do NOT decrease `ECHO_GRACE_MS` below 2000 (greeting will get cut off)
+
+**Global tool call guard** (`userSpokeSinceLastModelTurn`):
+- ALL tool calls are blocked if the user hasn't spoken since the last model turn
+- Prevents hallucinated tool calls from echo/noise being interpreted as speech
+- Do NOT remove this guard — it's the last line of defense against model hallucination
 
 **`isModelSpeaking` flag**:
 - Set to `true` when binary audio arrives from Gemini (with `modelSpeakingStartTime = Date.now()`)
@@ -132,6 +160,35 @@ The Gemini Live API has **NO built-in echo cancellation**. The following client-
 - Sent from content.js, results.js, wardrobe.js when operations finish
 - Forwarded to Gemini via `sendGeminiText()` as `clientContent` so the model knows the result is visible
 - Do NOT remove these — without them the model doesn't know when operations finish
+
+### Voice Agent Behavioral Rules — CRITICAL, DO NOT CHANGE
+
+The voice agent (Giselle) system prompt in `backend/services/giselleLive.js` implements these rules. Do NOT change them.
+
+**Smart Search (single item) — dresses ARE allowed:**
+- DIRECT ORDER ("search for a red dress"): acknowledge and call `search_product` immediately
+- RECOMMENDATION ("what dress for a wedding?"): describe the item with detail (color, material, style, WHY) → ask "Shall I search for that?" → WAIT for confirmation → then search
+- AFTER results load — DIRECT ORDER ("try on number 2"): call `try_on` immediately
+- AFTER results load — RECOMMENDATION ("which suits me best?"): call `recommend_items` → explain picks → wait for user to choose
+
+**Outfit Builder (6 categories) — NO dresses, always separate top + bottom:**
+- DIRECT ORDER: repeat back all items → confirm → call `build_outfit`
+- RECOMMENDATION: describe ALL 6 items with 5+ descriptive words each + WHY → "How does that sound?" → WAIT → confirm → call `build_outfit`
+- AFTER wardrobe loads — DIRECT ORDER: call `select_outfit_items` immediately
+- AFTER wardrobe loads — RECOMMENDATION: call `recommend_items` → explain each pick category by category with detailed WHY → confirm → call `try_on_outfit`
+
+**When items/wardrobe load**: agent stays SILENT. Never auto-recommend.
+
+**Mandatory acknowledgment**: before EVERY tool call, model MUST speak first to repeat back the user's request.
+
+**Accessory descriptions**: BANNED generic terms ("delicate earrings", "thin bracelet", "sparkling necklace"). Each item needs 5+ descriptive words + reason why it works.
+
+**`TRYON_COMPLETE` on error**: all try-on error handlers (wardrobe.js, results.js, content.js) MUST send `TRYON_COMPLETE` even on failure, otherwise the voice agent stays muted forever.
+
+**Vision-based recommendations** (`/api/recommend`):
+- Model: `gemini-3-flash-preview` with `thinkingConfig: { thinkingBudget: 2048 }`
+- Two modes: OUTFIT (picks best combination across 6 categories) and SEARCH (ranks individual items)
+- Do NOT change the model or remove thinking mode
 
 ## Tests
 - Run: `cd backend && npm test`

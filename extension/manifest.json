@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Gemini TryOnMe Everything - Universal Virtual Try-On",
+  "name": "Gemini TryOnMe Everything - Universal Virtual Try-On 1.1",
   "version": "1.1.0",
   "description": "Virtual try-on experience for clothing, shoes, cosmetics, and accessories on Amazon, SHEIN, Temu, and more — powered by Google Gemini.",
   "permissions": [
