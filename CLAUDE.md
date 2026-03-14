@@ -19,8 +19,9 @@ The outfit builder supports **6 categories**: top, bottom, shoes, necklace, earr
 ## CRITICAL: Do NOT Change These Settings
 
 ### Models
-- **Try-on generation**: `gemini-3-pro-image-preview` (in `backend/services/gemini.js`)
-- **Background removal / inpainting / accessories**: `gemini-2.5-flash-image` (in `backend/services/imageProcessor.js`)
+- **Single-item try-on (product page + smart search + accessories)**: `gemini-3.1-flash-image-preview` (in `backend/services/gemini.js`)
+- **Outfit builder try-on (multi-garment)**: `gemini-3-pro-image-preview` (in `backend/services/gemini.js`)
+- **Background removal / inpainting**: `gemini-2.5-flash-image` (in `backend/services/imageProcessor.js`)
 - Do NOT change these model names. They were validated to work. Previous bugs were caused by using non-existent model names.
 
 ### Smart Search Concurrency

@@ -93,13 +93,14 @@ NEVER split this into multiple messages or ask "should I add shoes/accessories?"
 7. User confirms → call try_on_outfit → wait silently for result
 8. Then optionally the user may ask to: save_to_favorites, animate, save_video — execute immediately when asked
 
-RECOMMENDATIONS — NEVER AUTO-SELECT OR AUTO-TRY-ON:
-- When user asks "which one looks best?" or "which one suits me?" → recommend your TOP 2-3 picks with brief reasoning for each (always mention the item numbers, e.g. "number 3 would be great because..., number 7 is also a strong option because...")
+RECOMMENDATIONS — ALWAYS USE recommend_items TOOL:
+- When user asks "which one looks best?", "which suits me?", "recommend me one" → ALWAYS call recommend_items tool FIRST. NEVER guess or pick items yourself — the tool uses AI vision to analyze the user's actual photo and items on screen. Only the tool gives personalized recommendations.
+- Say "Let me analyze these for you!" then call recommend_items. After receiving the tool response, you MUST go through EACH category one by one and explain WHY that item was picked — use the reasons from the tool response. For accessories, describe the actual piece AND how it coordinates with the outfit. NEVER just list item numbers without explaining WHY each was chosen.
 - THEN ask: "Which one would you like to try on first?" → WAIT for the user to pick ONE
 - NEVER call select_search_item, try_on, or any tool after giving recommendations — ONLY recommend verbally and wait for the user to choose
 - The user must explicitly say which item number to try on before you call any tool
 - You can ONLY try on ONE item at a time — never call try_on or select_search_item multiple times in a row
-- For single product search results: call recommend_items when user asks which item suits them`;
+- NEVER call save_to_favorites or save_video unless the user EXPLICITLY asks to save. These are NEVER automatic.`;
 
 const GISELLE_TOOLS = [
   {
@@ -172,7 +173,7 @@ const GISELLE_TOOLS = [
       },
       {
         name: "save_video",
-        description: "Save the current video. Only call after user asks and confirms.",
+        description: "Save the current video to cloud storage. ONLY call when the user EXPLICITLY says 'save the video' or 'save it'. NEVER call automatically after generating a video — the user must request it.",
         parameters: {
           type: "OBJECT",
           properties: {},
@@ -207,7 +208,7 @@ const GISELLE_TOOLS = [
       },
       {
         name: "animate",
-        description: "Animate current try-on into a video. Only call after user asks and confirms.",
+        description: "Animate current try-on result into a video. You MUST say 'Creating your animation now!' BEFORE calling this tool. Only call when user explicitly asks to animate.",
         parameters: {
           type: "OBJECT",
           properties: {},

@@ -1,0 +1,13 @@
+Imagine seeing exactly how clothes look on your body before you ever click "buy." That's Gemini TryOnMe Everything — a Chrome extension that brings AI-powered virtual try-on directly into your shopping experience on Amazon, SHEIN, Temu, and Google Shopping.
+
+Here's the problem: seventy percent of online clothing returns happen because the item didn't look as expected. That's over forty billion dollars wasted every year. No retailer — not even Amazon — offers a way to see clothes on YOUR actual body before purchasing. No voice shopping assistant. No way to build and try a complete outfit across multiple sellers.
+
+We solve all of that with three powerful modes. First, Product Page Try-On — browse any product page, click "Try It On," and in seconds see the garment on your own body with your real face, skin tone, and body shape preserved. Second, AI Smart Search — describe what you want in plain language, and our Playwright-powered agent finds curated products you can try on instantly. Third, the Outfit Builder — describe six items across tops, bottoms, shoes, necklace, earrings, and bracelet. The app searches for each in parallel, presents a virtual wardrobe, and lets you try the complete outfit in a single shot.
+
+But the star of the show is Giselle — our live voice AI stylist powered by the Gemini Live API. She listens, she sees your screen, and she helps you shop completely hands-free. Say "recommend me an outfit for a wedding" and she'll describe each piece with detail, explain why it flatters you, search for the items, and let you try them on — all by voice. She has twelve tools at her disposal and you can interrupt her naturally at any time.
+
+Under the hood, we're running seven Google AI models. Gemini three-point-one Flash Image for try-on generation. Gemini three Pro Image for outfit try-on and profile poses. Gemini Live two-point-five Flash Native Audio for real-time voice through a Vertex AI WebSocket proxy on Cloud Run. Gemini three Flash with thinking mode for vision-based recommendations. And Veo three-point-one for animating your try-on results into runway-style videos.
+
+All of this runs on Google Cloud — Cloud Run, Vertex AI, Firebase Auth, Cloud Firestore, and Cloud Storage — fully deployed, fully public, fully scalable.
+
+Gemini TryOnMe Everything. Try it before you buy it.

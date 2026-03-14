@@ -166,7 +166,7 @@ async function virtualTryOn(sourceImageBase64, referenceImageBase64, garmentClas
   console.log(`\x1b[34m  │ strategy:\x1b[0m     \x1b[1m\x1b[33m${strategy}\x1b[0m`);
   console.log(`\x1b[34m  │ \x1b[1mFULL PROMPT:\x1b[0m`);
   console.log(`\x1b[33m  │ ${prompt}\x1b[0m`);
-  const modelId = garmentClass === "ACCESSORY" ? "gemini-3-pro-image-preview" : "gemini-3.1-flash-image-preview";
+  const modelId = "gemini-3.1-flash-image-preview";
   console.log(`\x1b[34m  │ model:\x1b[0m        \x1b[1m${modelId}\x1b[0m`);
   console.log(`\x1b[34m  └─── CALLING GEMINI API... ───┘\x1b[0m`);
 
@@ -268,7 +268,7 @@ CRITICAL RULES:
 - Photorealistic result. Output only the resulting image.`;
 
   const response = await withCircuitBreaker("gemini", () => withTimeout(client.models.generateContent({
-    model: "gemini-3.1-flash-image-preview",
+    model: "gemini-3-pro-image-preview",
     contents: [
       {
         role: "user",

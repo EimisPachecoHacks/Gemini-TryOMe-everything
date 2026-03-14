@@ -4,6 +4,7 @@ const { removeBackground } = require("../services/imageProcessor");
 const { virtualTryOn: geminiVirtualTryOn, virtualTryOnOutfit: geminiOutfitTryOn, extractGarment, buildSmartPrompt } = require("../services/gemini");
 const { analyzeProduct, classifyOutfit, hasPersonInImage } = require("../services/classifier");
 const storage = require("../services/storage");
+const { buildCacheKey, buildOutfitCacheKey, getCached, setCached } = require("../services/tryOnCache");
 
 // ---------------------------------------------------------------------------
 // Shared garment preprocessing — single source of truth for all try-on flows
@@ -134,6 +135,15 @@ router.post("/", optionalAuth, async (req, res, next) => {
     const provider = req.body.provider || process.env.TRYON_PROVIDER || "gemini";
     const startTime = Date.now();
     const debugSteps = [];
+
+    // Cache check — return cached result if same try-on was done recently
+    const cacheKey = buildCacheKey(req.userId, referenceImage, garmentClass, framing, poseIndex);
+    const cachedResult = await getCached(cacheKey);
+    if (cachedResult) {
+      const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`\x1b[1m\x1b[32m  ⚡ CACHE HIT — returning cached result (${totalTime}s)\x1b[0m`);
+      return res.json({ resultImage: cachedResult, totalTime: totalTime + "s", cached: true });
+    }
 
     console.log(`\n\x1b[1m\x1b[33m╔══════════════════════════════════════════════════════╗\x1b[0m`);
     console.log(`\x1b[1m\x1b[33m║           🔥 TRY-ON REQUEST RECEIVED 🔥              ║\x1b[0m`);
@@ -282,6 +292,9 @@ router.post("/", optionalAuth, async (req, res, next) => {
     console.log(`\x1b[1m\x1b[32m║         ✅ TRY-ON COMPLETE — ${totalTime}s total               ║\x1b[0m`);
     console.log(`\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════╝\x1b[0m\n`);
 
+    // Store in cache for future identical try-ons (async, non-blocking)
+    setCached(cacheKey, resultImage, req.userId).catch(() => {});
+
     res.set("Cache-Control", "no-store");
     res.json({
       resultImage,
@@ -357,6 +370,14 @@ router.post("/outfit", optionalAuth, async (req, res, next) => {
       }
     });
 
+    // Cache check — return cached result if same outfit try-on was done recently
+    const outfitCacheKey = buildOutfitCacheKey(req.userId, garments, framing, poseIndex);
+    const cachedOutfit = await getCached(outfitCacheKey);
+    if (cachedOutfit) {
+      console.log(`\x1b[1m\x1b[32m  ⚡ OUTFIT CACHE HIT — returning cached result\x1b[0m`);
+      return res.json({ resultImage: cachedOutfit, totalTime: "0.1s", cached: true });
+    }
+
     const startTime = Date.now();
 
     console.log(`\n\x1b[1m\x1b[33m╔══════════════════════════════════════════════════════╗\x1b[0m`);
@@ -391,6 +412,9 @@ router.post("/outfit", optionalAuth, async (req, res, next) => {
     console.log(`\n\x1b[1m\x1b[32m╔══════════════════════════════════════════════════════╗\x1b[0m`);
     console.log(`\x1b[1m\x1b[32m║      ✅ OUTFIT TRY-ON COMPLETE — ${totalTime}s total            ║\x1b[0m`);
     console.log(`\x1b[1m\x1b[32m╚══════════════════════════════════════════════════════╝\x1b[0m\n`);
+
+    // Store in cache for future identical outfit try-ons (async, non-blocking)
+    setCached(outfitCacheKey, resultImage, req.userId).catch(() => {});
 
     res.set("Cache-Control", "no-store");
     res.json({ resultImage, totalTime: totalTime + "s" });

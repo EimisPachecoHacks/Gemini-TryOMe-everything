@@ -15,7 +15,7 @@ A Chrome Extension that lets you see clothes on YOUR body before you buy. Browse
 ### 1. Giselle — Live Voice AI Stylist (Gemini Live API)
 Talk to Giselle, your personal AI fashion stylist, using natural voice conversation. She can see your screen, analyze your body type and skin tone, and help you find the perfect outfit.
 - **Real-time voice conversation** via Gemini Live API (`gemini-live-2.5-flash-native-audio`)
-- **Barge-in support** — interrupt Giselle mid-sentence naturally (client-side energy-threshold detection + `NO_INTERRUPTION` mode)
+- **Barge-in support** — interrupt Giselle mid-sentence naturally (server-side VAD + client-side energy-threshold echo gating)
 - **12 voice-activated tools** — search products, build outfits, try on items, save favorites, animate videos, get AI recommendations — all hands-free
 - **Vision-based recommendations** — Giselle calls an AI vision model that analyzes your photo + all items on screen to recommend the best combination
 - **Distinct persona** — warm, fashion-forward stylist with the Aoede voice, context-aware responses
@@ -31,47 +31,60 @@ Browse any product page on Amazon, SHEIN, or Temu. A **"Try It On"** button appe
 - 3 selectable AI-generated poses
 
 ### 3. AI Smart Search
-Type what you want in natural language: *"black dresses for women"*. An AI agent browses products, applies quality filters (4+ stars), and returns 20+ curated products — each with a "Try On" button.
+Type what you want in natural language: *"black dresses for women"*. Playwright browses Amazon in a headless browser, applies quality filters (4+ stars), and returns 20+ curated products — each with a "Try On" button.
 - Natural language queries instead of keyword search
+- Playwright-based product discovery (headless browser on Cloud Run)
 - Product grid with prices, ratings, and direct links
 - Instant try-on from search results
 
 ### 4. Outfit Builder
-Build a complete outfit by describing a **top, bottom, and shoes** separately. AI searches for each category in parallel, presents a virtual wardrobe with hangers, and lets you mix & match. Try the full outfit together in one shot.
-- 3 parallel product searches
-- Background removal on all product images
-- Visual wardrobe with hanger display
-- Single-call multi-garment try-on with identity preservation
+Build a complete outfit across **6 categories**: top, bottom, shoes, necklace, earrings, and bracelet. AI searches for each category in parallel, presents a virtual wardrobe with hangers and accessory bar, and lets you mix & match. Try the full outfit together in one shot.
+- 6 parallel Playwright product searches
+- Background removal on clothing/shoe images
+- Visual wardrobe with hanger display + accessory ceiling bar
+- Single-call multi-garment try-on with identity preservation (Gemini 3 Pro Image)
+- AI vision-based recommendations across all 6 categories
 
 ### 5. Video Animation
 Transform any try-on result into a 6-second video with natural model-like movement, fabric flow, and subtle poses.
-- Powered by **Grok Imagine Video** (xAI via fal.ai)
+- Powered by **Google Veo 3.1** (image-to-video generation)
 - 720p portrait format (9:16)
 - Save to cloud or download locally
 
 ### 6. Cosmetics Try-On
 Virtual makeup application using AI inpainting. Try lipstick, eyeshadow, blush, foundation, eyeliner, and mascara in any color on your own face.
 
-### 7. Sharing & Email
+### 7. Cross-Retailer Price Comparison
+Compare Amazon prices with Walmart, SHEIN, Temu, Poshmark, and more. One Google Shopping search per product finds alternatives across retailers automatically.
+- No `site:` filter — finds more cross-retailer results
+- Deduplication by title
+- Retailer extracted from card text + URL domain
+
+### 8. Try-On Cache
+Identical try-ons are cached for 48 hours using Firestore + Cloud Storage — saving AI generation costs and returning instant results on repeated try-ons.
+
+### 9. Sharing & Email
 Share your try-on results via download, clipboard copy, or email. Send branded emails with the try-on image embedded inline to yourself or anyone.
 
-### 8. Favorites & Profiles
+### 10. Favorites & Profiles
 Full user account system with cloud storage. Save your best looks, browse your try-on history, and manage multiple AI-generated profile poses.
 
 ---
 
 ## Architecture
 
+![Architecture Diagram](app-images/architecture-diagram.png)
+
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────────┐
 │   Chrome Extension   │     │   Express Backend    │     │    AI Models          │
 │   (Manifest V3)      │────>│   (Cloud Run)        │────>│                      │
 │                      │     │                      │     │  Gemini Live API     │
-│  • Content Script    │     │  /api/try-on         │     │  (native audio)      │
-│  • Background Worker │     │  /api/try-on/outfit  │     │  Gemini 2.5 Flash    │
-│  • Popup Side Panel  │     │  /api/analyze        │     │  Gemini 3 Pro Image  │
+│  • Content Script    │     │  /api/try-on         │     │  Gemini 3.1 Flash    │
+│  • Background Worker │     │  /api/try-on/outfit  │     │  Gemini 3 Pro Image  │
+│  • Popup Side Panel  │     │  /api/analyze        │     │  Gemini 2.5 Flash    │
 │  • Smart Search UI   │     │  /api/cosmetics      │     │  Gemini 3 Flash      │
-│  • Outfit Builder UI │     │  /api/video          │     │  Grok xAI Video      │
+│  • Outfit Builder UI │     │  /api/video          │     │  Google Veo 3.1      │
 │  • Voice Agent UI    │     │  /api/recommend      │     │                      │
 │                      │     │  /api/smart-search   │     └──────────────────────┘
 └─────────┬───────────┘     │  /api/auth/*         │
@@ -98,17 +111,17 @@ Each single-garment try-on goes through a 5-step AI orchestration:
 
 | Step | Name | Model | What It Does |
 |------|------|-------|--------------|
-| 1 | Product Analysis | Gemini Flash | Classifies garment type, color, category |
-| 2 | Garment Preprocessing | Gemini Flash Image | Detects model in image, extracts clean garment |
-| 3 | Outfit Classification | Gemini Flash | Classifies what the user is currently wearing |
+| 1 | Product Analysis | Gemini 2.5 Flash | Classifies garment type, color, category |
+| 2 | Garment Preprocessing | Gemini 2.5 Flash Image | Detects model in image, extracts clean garment |
+| 3 | Outfit Classification | Gemini 2.5 Flash | Classifies what the user is currently wearing |
 | 4 | Conflict Resolution | buildSmartPrompt | Builds context-aware prompt based on garment + outfit combination |
-| 5 | Virtual Try-On | Gemini 2.5 Flash Image | Generates photorealistic result preserving user identity |
+| 5 | Virtual Try-On | Gemini 3.1 Flash Image | Generates photorealistic result preserving user identity |
 
 ### Outfit Builder Pipeline
 
 The outfit builder uses a single Gemini 3 Pro Image call with all garments + face reference photos for identity preservation:
 
-1. User selects top, bottom, and shoes from the wardrobe
+1. User selects items across 6 categories (top, bottom, shoes, necklace, earrings, bracelet) from the wardrobe
 2. All garment images go through preprocessing (person detection + extraction)
 3. Face reference photos are fetched from Cloud Storage as identity anchors
 4. Single API call to Gemini 3 Pro with garments first, identity photos last, low temperature (0.4)
@@ -122,10 +135,12 @@ The outfit builder uses a single Gemini 3 Pro Image call with all garments + fac
 | Model | Provider | Role |
 |-------|----------|------|
 | **Gemini Live 2.5 Flash Native Audio** | Google (Vertex AI) | Real-time voice conversation with Giselle AI stylist |
-| **Gemini 2.5 Flash Image** | Google | Product classification, outfit detection, single-garment try-on, garment extraction, AI profile generation, background removal, cosmetics inpainting |
-| **Gemini 3 Pro Image** | Google | Multi-garment outfit try-on (better identity preservation) |
+| **Gemini 3.1 Flash Image Preview** | Google | Single-garment try-on, accessory try-on, garment extraction |
+| **Gemini 2.5 Flash Image** | Google | Background removal, inpainting, cosmetics visualization |
+| **Gemini 2.5 Flash** | Google | Product classification, outfit detection, person detection |
+| **Gemini 3 Pro Image** | Google | Multi-garment outfit try-on, AI profile pose generation (better identity preservation) |
 | **Gemini 3 Flash** | Google | Vision-based outfit recommendations (with thinking mode) |
-| **Grok Imagine Video** | xAI (via fal.ai) | Image-to-video animation of try-on results |
+| **Veo 3.1** | Google | Image-to-video animation of try-on results |
 
 ### Google Cloud Infrastructure
 
@@ -135,7 +150,7 @@ The outfit builder uses a single Gemini 3 Pro Image call with all garments + fac
 | **Vertex AI** | Gemini Live API access with server-side authentication (service account) |
 | **Firebase Auth** | User authentication, email verification, JWT tokens |
 | **Google Cloud Storage** | User photos, AI-generated poses, try-on results, videos |
-| **Cloud Firestore** | User profiles, favorites, video metadata |
+| **Cloud Firestore** | User profiles, favorites, video metadata, try-on cache (48h TTL) |
 | **Gmail SMTP** | Email sharing of try-on results (via Nodemailer) |
 
 ### Application Stack
@@ -143,8 +158,10 @@ The outfit builder uses a single Gemini 3 Pro Image call with all garments + fac
 | Component | Technology |
 |-----------|-----------|
 | Frontend | Chrome Extension (Manifest V3) — content scripts, background service worker, popup |
-| Backend | Node.js + Express |
+| Backend | Node.js + Express on Google Cloud Run |
+| Product Discovery | Playwright (Python) — headless browser for Smart Search + Outfit Builder |
 | Image Processing | Sharp |
+| Video Generation | Google Veo 3.1 |
 | Auth | Firebase Auth with JWT token verification |
 
 ---
@@ -159,7 +176,6 @@ The outfit builder uses a single Gemini 3 Pro Image call with all garments + fac
   - Firestore database
   - Service account credentials
 - **Google Gemini API key** (from Google AI Studio)
-- **fal.ai API key** (for Grok video generation)
 - **Gmail account** with App Password (for email sharing)
 
 ---
@@ -195,7 +211,6 @@ FIREBASE_API_KEY=your_firebase_api_key
 
 # AI Model Keys
 GEMINI_API_KEY=your_gemini_api_key
-FAL_KEY=your_fal_ai_key
 
 # Email Sharing (Gmail SMTP)
 GMAIL_USER=your-gmail@gmail.com
@@ -265,10 +280,10 @@ curl http://localhost:3001/
 ### Outfit Builder
 
 1. Click the extension icon → **Outfit Builder** tab
-2. Describe your desired **top**, **bottom**, and **shoes** separately
-3. Click **Build Outfit** — AI searches for each category in parallel
-4. A virtual wardrobe appears with hangers and shoe rack
-5. Select one item from each category
+2. Describe your desired **top, bottom, shoes, necklace, earrings, and bracelet**
+3. Click **Build Outfit** — Playwright searches for each of the 6 categories in parallel
+4. A virtual wardrobe appears with hangers, shoe rack, and accessory ceiling bar
+5. Select one item from each category (or ask Giselle to recommend)
 6. Click **Try On** to see the complete outfit on your body
 7. Click **Save to Favorites** to keep the outfit
 
@@ -282,7 +297,7 @@ curl http://localhost:3001/
 | POST | `/api/try-on` | Single-garment virtual try-on (5-step pipeline) |
 | POST | `/api/try-on/outfit` | Multi-garment outfit try-on (single Gemini call) |
 | POST | `/api/cosmetics` | Cosmetics try-on via inpainting |
-| POST | `/api/video` | Start video generation (Grok) |
+| POST | `/api/video` | Start video generation (Veo 3.1) |
 | GET | `/api/video/:jobId` | Poll video generation status |
 | POST | `/api/video/save` | Save generated video to Cloud Storage |
 | POST | `/api/image/remove-bg` | Background removal (Gemini) |
@@ -328,12 +343,13 @@ GeminiTryOnMe/
 │   │   ├── gemini.js          # Gemini API (try-on, extraction, profiles)
 │   │   ├── imageProcessor.js  # Image processing (BG removal, inpainting)
 │   │   ├── classifier.js      # Product classification (Gemini)
-│   │   ├── grok.js            # Grok video generation (fal.ai)
+│   │   ├── veo.js             # Veo 3.1 video generation (Google)
 │   │   ├── giselleLive.js     # Voice agent config (system prompt, tools)
 │   │   ├── giselle.js         # Voice chat (Gemini)
 │   │   ├── firestore.js       # Firestore operations
 │   │   ├── storage.js         # Cloud Storage operations
 │   │   ├── firebaseAuth.js    # Firebase Auth operations
+│   │   ├── tryOnCache.js      # Try-on result caching (Firestore + GCS)
 │   │   ├── circuitBreaker.js  # Circuit breaker pattern
 │   │   └── withTimeout.js     # Promise timeout utility
 │   ├── middleware/
